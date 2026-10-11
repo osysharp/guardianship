@@ -1,0 +1,52 @@
+// Emergency contacts and who may collect: kept by the family, read by staff on site, hidden from everyone else.
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.Guardianship;
+
+[Test(LeoAtSchool)]
+void a_teacher_reads_who_to_call_and_who_may_collect_him() {
+  runas (Tom) {
+    var contacts = EmergencyContactsOf(Leo);
+    Assert.Equal(2, contacts.Count);
+    Assert.Equal("Grandma Rut", contacts[0].Name);
+    var collect = MayCollectNames(Leo);
+    Assert.Equal(2, collect.Count);
+    Assert.Equal("Ana", collect[0]);
+    Assert.Equal("Grandma Rut", collect[1]);
+  }
+}
+
+[Test(LeoAtSchool)]
+void his_parent_keeps_them_and_a_teacher_does_not() {
+  runas (Ana) {
+    new EmergencyContact { Person = Leo, Name = "Uncle Jo", Phone = "+46 70 555 00 11", Priority = 3, MayCollect = true };
+    UnitOfWork.Commit();
+    var kai = EmergencyContact.Single(c => c.Name == "Neighbour Kai");
+    kai.Phone = "+46 70 765 43 22";
+    UnitOfWork.Commit();
+    Assert.Equal(3, EmergencyContactsOf(Leo).Count);
+  }
+  runas (Tom) {
+    Assert.Denied(() => { EmergencyContact.Single(c => c.Name == "Neighbour Kai").Phone = "0"; UnitOfWork.Commit(); });
+    Assert.Denied(() => { new EmergencyContact { Person = Leo, Name = "Tom", Phone = "1" }; UnitOfWork.Commit(); });
+  }
+}
+
+[Test(LeoAtSchool)]
+void a_stranger_neither_reads_nor_adds_them() {
+  runas (Sid) {
+    Assert.Equal(0, EmergencyContact.Count());
+    Assert.Denied(() => { new EmergencyContact { Person = Leo, Name = "Sid", Phone = "1", MayCollect = true }; UnitOfWork.Commit(); });
+  }
+  runas (Leo) { Assert.Equal(2, EmergencyContactsOf(Leo).Count); }
+}
+
+[Test(LeoAtSchool)]
+void a_parent_who_stepped_back_reads_them_and_changes_nothing() {
+  runas (Ana) { ChangeStanding(LinkOf("Ana", "Leo"), GuardianStanding.Informed); }
+  runas (Ana) {
+    Assert.Equal(2, EmergencyContactsOf(Leo).Count);
+    Assert.Denied(() => { EmergencyContact.Single(c => c.Name == "Neighbour Kai").Phone = "0"; UnitOfWork.Commit(); });
+    Assert.Equal(0, MayCollectNames(Leo).Count(n => n == "Ana"));
+  }
+}

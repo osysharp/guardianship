@@ -1,0 +1,68 @@
+// Everything the music school says to the kit: its roles, who runs the links, who reads them on the day, who may add a
+// child — and its own rule built on `KeptInformedOf`.
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.Guardianship;
+
+[Role] enum AppRole { Authenticator, Member, Teacher, Office }
+
+policy IsOffice => RoleGrant.Any(g => g.Member == user && g.Role == AppRole.Office);
+policy IsTeacher => RoleGrant.Any(g => g.Member == user && g.Role == AppRole.Teacher);
+
+policy ManagesGuardianships => IsOffice;
+policy SeesFamilies => IsOffice || IsTeacher;
+policy MakesManagedAccounts => IsAuthenticated;
+
+/// The school bars anyone the office has put on its list from taking on a child.
+policy MayLinkAsGuardian(Principal guardian, Principal dependant) => !Barred.Any(b => b.Person == guardian);
+
+app.Accounts = new AccountsSetup { AppName = "Northside Music School", SignupRole = AppRole.Member };
+
+/// The age at which a pupil decides for themself here, and what a parent becomes then — functions, so a test can move them.
+int SchoolAgeOfMajority() { return 18; }
+GuardianStanding SchoolAtMajority() { return GuardianStanding.Ended; }
+app.Guardianship = new GuardianshipSetup { AgeOfMajority = SchoolAgeOfMajority(), AtMajority = SchoolAtMajority() };
+
+/// Somebody the office will not let take on a child.
+entity Barred {
+  [Required] Principal Person;
+  security { allow read when IsAuthenticated; allow create when IsOffice; }
+}
+
+/// A teacher's note after a lesson: the pupil reads it, and so does anyone who looks after them — through the kit.
+entity LessonNote {
+  [Required] Principal Pupil;
+  [Required, MaxLength(400)] string Text;
+  security {
+    allow read when IsAuthenticated where Pupil == user;
+    allow read when LooksAfterSomeone where KeptInformedOf(Pupil);
+    allow read, create when IsTeacher;
+  }
+}
+
+/// What the school heard from the kit, one line each.
+entity Heard {
+  [Required, MaxLength(200)] string Line;
+  security { allow read when IsAuthenticated || IsAnonymous; }
+}
+
+[On] void HeardLinked(GuardianLinked e) {
+  new Heard { Line = "linked " + e.Guardianship.Guardian.DisplayName + " > " + e.Guardianship.Dependant.DisplayName };
+  UnitOfWork.Commit();
+}
+[On] void HeardStanding(GuardianStandingChanged e) {
+  new Heard { Line = "standing " + e.Guardianship.Guardian.DisplayName + " " + e.From + " > " + e.Guardianship.Standing };
+  UnitOfWork.Commit();
+}
+[On] void HeardOfAge(DependantCameOfAge e) {
+  new Heard { Line = "of age " + e.Person.DisplayName };
+  UnitOfWork.Commit();
+}
+[On] void HeardInvited(GuardianInvited e) {
+  new Heard { Line = "invited " + e.Invitation.Email };
+  UnitOfWork.Commit();
+}
+[On] void HeardConsent(ConsentAnswered e) {
+  new Heard { Line = "consent " + e.Consent.Form.Key + " " + e.Consent.Answer };
+  UnitOfWork.Commit();
+}

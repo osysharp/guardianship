@@ -1,0 +1,170 @@
+// A person somebody looks after: their date of birth, what staff must know about them, the day they come of age —
+// and adding a child, whose account their guardian makes and later hands over.
+
+namespace Osysharp.Guardianship;
+
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.Workflow;
+
+/// Where a person stands on their way to deciding for themself — tracked by `ComingOfAge`. ⚠ Appended, never inserted.
+public enum AgeStage {
+  /// Under age, or no date of birth known yet.
+  [Label("Under age")] Minor,
+  [Label("Of age")] OfAge,
+}
+
+/// What the kit knows about a person somebody looks after. One per person, made when a child is added (or by the desk);
+/// the person's guardians keep it. A person with no profile is taken to decide for themself.
+public entity DependantProfile {
+  [Required, Immutable, Unique("That person already has a profile.")] Principal Person;
+  /// Their date of birth — what tells the kit when they come of age.
+  [Classification(Personal.Identity)] DateOnly? BornOn;
+  /// What staff must know to look after them: allergies, medication, needs. Read by their guardians and `SeesFamilies`.
+  [Classification(Personal.Special), MaxLength(2000)] string? CareNotes;
+  /// When they came of age (or the desk declared them of age).
+  DateTime? CameOfAgeAt;
+  AgeStage Stage;                                   // no default — ComingOfAge owns it
+
+  security {
+    allow read when IsAuthenticated where Person == user;
+    allow read when LooksAfterSomeone where KeptInformedOf(Person);
+    allow read when SeesFamilies;
+    allow create when IsAuthenticated;
+    allow update when ActsForSomeone where ActsForDependant(Person);
+    allow update when ManagesGuardianships;
+    deny create except via AddDependant, KeepProfile;
+    deny update BornOn except via SetBornOn;
+    deny update CameOfAgeAt except via ComeOfAge;
+  }
+}
+
+/// A person came of age: every guardian who acted for them now has the standing the app chose (`AtMajority`).
+[Event("Came of age")]
+public sealed class DependantCameOfAge { public Principal Person; }
+
+/// The day `person` comes of age, when their date of birth is known.
+public DateOnly? ComesOfAgeOn(Principal person) {
+  var profile = DependantProfile.FirstOrDefault(p => p.Person == person);
+  if (profile == null || profile.BornOn == null) { return null; }
+  return MajorityOn(profile.BornOn.Value);
+}
+
+/// Add a child (or anyone who will not sign in themself) whom the caller looks after: an account they cannot sign in to
+/// yet (Osysharp.UserAccounts' `MakeManagedAccount` — the app answers `MakesManagedAccounts`), the caller acting for them,
+/// and their profile. Answers the link; its `Dependant` is the new account. Throws the sentence to show.
+[Server, Authorize(MakesManagedAccounts)]
+public Guardianship AddDependant(string name, DateOnly? bornOn = null,
+                                 GuardianRelationship relationship = GuardianRelationship.Parent, string careNotes = "") {
+  var me = CurrentPrincipal();
+  if (bornOn != null && bornOn.Value > DateOnly.FromDateTime(DateTime.UtcNow)) {
+    throw new ValidationException("A date of birth cannot be in the future.");
+  }
+  var made = MakeManagedAccount(name);
+  UnitOfWork.Commit();
+  var account = ManagedAccountRequest.Single(r => r.Id == made.Id).Account!;
+  if (!MayLinkAsGuardian(me, account)) {
+    throw new NotAuthorized("You cannot be linked as a guardian here. Ask the desk.");
+  }
+  var link = new Guardianship { Guardian = me, Dependant = account, Relationship = relationship };
+  new DependantProfile { Person = account, BornOn = bornOn, CareNotes = careNotes.Trim() == "" ? null : careNotes.Trim() };
+  UnitOfWork.Commit();
+  Raise(new GuardianLinked { Guardianship = link });
+  return link;
+}
+
+/// Start a profile for somebody who already has an account — the desk, for a member it now knows is under age.
+[Server, Authorize(ManagesGuardianships)]
+public DependantProfile KeepProfile(Principal person, DateOnly? bornOn = null) {
+  var existing = DependantProfile.FirstOrDefault(p => p.Person == person);
+  if (existing != null) { return existing; }
+  var profile = new DependantProfile { Person = person, BornOn = bornOn };
+  UnitOfWork.Commit();
+  return profile;
+}
+
+/// Set (or correct) a person's date of birth — one of their guardians, or the desk. Their clock is re-armed at once:
+/// a date that makes them of age now ends the guardianships today.
+[Server, Authorize(IsAuthenticated)]
+public void SetBornOn(DependantProfile profile, DateOnly bornOn) {
+  if (!ManagesGuardianships && !IsGuardianOf(CurrentPrincipal(), profile.Person)) {
+    throw new NotAuthorized("Only the person's guardians, or the desk, can set their date of birth.");
+  }
+  if (profile.CameOfAgeAt != null) { throw new ValidationException("They have already come of age."); }
+  if (bornOn > DateOnly.FromDateTime(DateTime.UtcNow)) { throw new ValidationException("A date of birth cannot be in the future."); }
+  profile.BornOn = bornOn;
+  UnitOfWork.Commit();
+  ComingOfAge.RaiseRecheck(profile);
+}
+
+/// The desk declares a person of age before their birthday says so — an emancipated minor, a date it has checked.
+[Server, Authorize(ManagesGuardianships)]
+public void DeclareOfAge(DependantProfile profile) {
+  ComingOfAge.RaiseDeclare(profile);
+}
+
+/// The day a person comes of age: each guardian who acted for them takes the standing the app chose, and the app hears
+/// `DependantCameOfAge`. Run by their clock, as the system.
+[Server, Authorize(IsAuthenticated)]
+internal void ComeOfAge(DependantProfile profile) {
+  if (profile.CameOfAgeAt != null) { return; }
+  var after = App.Setting<GuardianshipSetup>().AtMajority;
+  var acting = Guardianship.Where(g => g.Dependant == profile.Person && g.Standing == GuardianStanding.Acting).Take(50).ToList();
+  foreach (var g in acting) {
+    g.Standing = after;
+    g.ChangedAt = DateTime.UtcNow;
+    g.ChangeReason = "Came of age";
+  }
+  profile.CameOfAgeAt = DateTime.UtcNow;
+  UnitOfWork.Commit();
+  foreach (var g in acting) {
+    if (g.Standing != GuardianStanding.Acting) { Raise(new GuardianStandingChanged { Guardianship = g, From = GuardianStanding.Acting }); }
+  }
+  Raise(new DependantCameOfAge { Person = profile.Person });
+}
+
+/// How long until the profile's person comes of age — what their clock waits. With no date of birth it waits a year and
+/// looks again (setting a date re-arms it at once).
+TimeSpan UntilMajority(DependantProfile profile) {
+  if (profile.BornOn == null) { return TimeSpan.FromDays(365); }
+  var due = MajorityOn(profile.BornOn.Value).ToDateTime(TimeOnly.MinValue);
+  var wait = due - DateTime.UtcNow;
+  return wait < TimeSpan.Zero ? TimeSpan.Zero : wait;
+}
+
+/// Each profile's clock: it waits for the person's coming of age, then changes their guardians' standing once.
+workflow ComingOfAge {
+  Tracks    = DependantProfile.Stage;
+  Autostart = true;
+  Initial   = Minor;
+
+  event Recheck();
+  event Declare();
+
+  state Minor {
+    enter {
+      if (this.Item.BornOn != null && !NeedsGuardian(this.Item.BornOn.Value)) { goto OfAge; }
+    }
+    Expire { Within = UntilMajority(this.Item); Accrues = false; }
+    subscribe Recheck();
+    subscribe Declare();
+    on Recheck { goto Minor; }
+    on Declare { goto OfAge; }
+    on Expire { goto Minor; }
+  }
+
+  terminal success OfAge {
+    enter { ComeOfAge(this.Item); }
+  }
+}
+
+/// Hand a child's account over to them: their guardian gives it an address, a link goes there, and once it is opened
+/// they sign in on their own (Osysharp.UserAccounts' `GiveManagedAccountAnAddress`). Their guardians go on acting for them
+/// until they come of age. Only the guardian who added them may — the one Accounts records.
+[Server, Authorize(MakesManagedAccounts)]
+public void HandOverAccount(Principal dependant, string address) {
+  if (!IsGuardianOf(CurrentPrincipal(), dependant)) {
+    throw new NotAuthorized("Only someone who acts for them can hand their account over.");
+  }
+  GiveManagedAccountAnAddress(User.Single(u => u.Id == dependant.Id), address);
+}

@@ -1,0 +1,28 @@
+// Handing a child's account over: the guardian gives it an address, the child signs in on their own — and their
+// guardians go on acting for them until they come of age.
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.Guardianship;
+
+[Test(School)]
+void a_parent_hands_her_sons_account_over_and_still_acts_for_him() {
+  runas (Ana) { AddDependant("Noor", Today().AddYears(-15)); }
+  User? noor = null;
+  runas (Oona) { noor = Person("Noor"); }
+  // Another parent cannot hand over somebody else's child.
+  runas (Ben) { Assert.Throws<NotAuthorized>(() => HandOverAccount(noor!, "noor@school.test")); }
+  runas (Ana) { HandOverAccount(noor!, "noor@school.test"); }
+  string token = "";
+  runas (AuthBootstrap) { token = TokenIn("noor@school.test", "/verify-email/"); }
+  Assert.NotEqual("", token);
+  runas (AuthBootstrap) { VerifyEmail(token); }
+  runas (Oona) { Assert.Equal("noor@school.test", Person("Noor").Email); }
+  runas (Noor) {
+    Assert.Equal(1, GuardiansOf(Noor).Count);
+    Assert.True(IsMinor(Noor));
+    Assert.Throws<NotAuthorized>(() => ChangeStanding(GuardiansOf(Noor)[0], GuardianStanding.Ended));
+  }
+  runas (Ana) { Assert.True(ActsForDependant(Noor)); }
+}
+
+principal Noor => User.Single(u => u.DisplayName == "Noor");

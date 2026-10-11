@@ -1,0 +1,78 @@
+// Consents: answered by the person once they decide for themself, by a guardian before that, against the current words.
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.Guardianship;
+
+ConsentForm Form(string key) { return ConsentForm.Single(f => f.Key == key); }
+
+[Test(LeoAtSchool)]
+void a_parent_gives_consent_for_her_child_and_the_answer_keeps_its_words() {
+  runas (Ana) {
+    Assert.Equal(2, ConsentsOwed(Leo).Count);
+    var c = AnswerConsent(Leo, Form("photos"), ConsentAnswer.Given);
+    Assert.Equal("Ana", c.AnsweredBy.DisplayName);
+    Assert.Contains("photos of your child", c.Wording);
+    Assert.True(HasConsent(Leo, "photos"));
+    Assert.False(HasConsent(Leo, "first-aid"));
+    Assert.Equal(1, ConsentsOwed(Leo).Count);
+  }
+  runas (Tom) { Assert.True(HasConsent(Leo, "photos")); }
+  Assert.Equal(1, HeardCount("consent photos Given"));
+}
+
+[Test(LeoAtSchool)]
+void new_words_ask_everyone_again() {
+  runas (Ana) { AnswerConsent(Leo, Form("photos"), ConsentAnswer.Given); }
+  runas (Oona) {
+    var revised = ReviseConsentForm(Form("photos"), "We may use photos and video of your child from concerts on our website and social media.");
+    Assert.Equal(2, revised.Version);
+  }
+  runas (Ana) {
+    Assert.False(HasConsent(Leo, "photos"));
+    Assert.Equal(2, ConsentsOwed(Leo).Count);
+    AnswerConsent(Leo, Form("photos"), ConsentAnswer.Refused);
+    Assert.False(HasConsent(Leo, "photos"));
+    Assert.Equal(2, Consent.Count(c => c.Person == Leo));     // both answers kept
+  }
+}
+
+[Test(LeoAtSchool)]
+void a_withdrawn_consent_no_longer_counts() {
+  runas (Ana) {
+    AnswerConsent(Leo, Form("first-aid"), ConsentAnswer.Given);
+    AnswerConsent(Leo, Form("first-aid"), ConsentAnswer.Withdrawn);
+    Assert.False(HasConsent(Leo, "first-aid"));
+  }
+}
+
+[Test(LeoAtSchool)]
+void a_child_does_not_answer_for_himself_and_a_stranger_answers_for_nobody() {
+  runas (Leo) { Assert.Contains("A guardian answers this", Assert.Throws(() => AnswerConsent(Leo, Form("photos"), ConsentAnswer.Given)).Message); }
+  runas (Sid) { Assert.Throws<NotAuthorized>(() => AnswerConsent(Leo, Form("photos"), ConsentAnswer.Given)); }
+  runas (Tom) { Assert.False(HasConsent(Leo, "photos")); }
+}
+
+[Test(School)]
+void an_adult_answers_for_herself() {
+  runas (Ada) {
+    AnswerConsent(Ada, Form("photos"), ConsentAnswer.Given);
+    Assert.True(HasConsent(Ada, "photos"));
+  }
+}
+
+[Test(LeoAtSchool)]
+void nobody_writes_a_consent_by_hand_and_only_the_office_changes_a_forms_words() {
+  runas (Ana) {
+    Assert.Denied(() => { ConsentDirectly(Leo, Form("photos")); UnitOfWork.Commit(); });
+    Assert.Throws<NotAuthorized>(() => ReviseConsentForm(Form("photos"), "Anything goes."));
+  }
+  runas (Oona) {
+    Assert.Denied(() => { Form("photos").Wording = "Quietly changed."; UnitOfWork.Commit(); });
+    Assert.Denied(() => { ConsentDirectly(Leo, Form("photos")); UnitOfWork.Commit(); });
+  }
+}
+
+[Test(School)]
+void a_key_no_form_has_is_never_consented() {
+  runas (Ada) { Assert.False(HasConsent(Ada, "nothing")); }
+}

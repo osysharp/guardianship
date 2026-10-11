@@ -1,0 +1,130 @@
+// What the family pages read: one person somebody looks after, with everything the kit knows about them, as lines a
+// page shows. Each is read as the caller, so a line holds only what the caller may see.
+
+namespace Osysharp.Guardianship;
+
+using Osysharp.Identity;
+
+/// One person who looks after somebody, as a page lists them.
+public class GuardianLine {
+  public Guid LinkId;
+  public string Name = "";
+  public string Relationship = "";
+  public GuardianStanding Standing;
+  /// The caller is this guardian.
+  public bool You;
+}
+
+/// One emergency contact, as a page lists it.
+public class ContactLine {
+  public Guid Id;
+  public string Name = "";
+  public string Phone = "";
+  public string Relationship = "";
+  public int Priority;
+  public bool MayCollect;
+}
+
+/// One consent form and where the person stands on it.
+public class ConsentLine {
+  public Guid FormId;
+  public string Title = "";
+  public string Wording = "";
+  /// Given, Refused or Withdrawn — or "" when the current words have no answer yet.
+  public string Answer = "";
+  public string AnsweredBy = "";
+  public DateTime? At;
+}
+
+/// Everything about one person somebody looks after, as the caller may see it.
+public class FamilyMember {
+  public Guid PersonId;
+  public string Name = "";
+  /// "Age 9 · comes of age on 3 May 2035", or "" when no date of birth is known.
+  public string Facts = "";
+  public bool Minor;
+  /// The caller acts for them (rather than being kept informed).
+  public bool YouAct;
+  public List<GuardianLine> Guardians = [];
+  public List<ContactLine> Contacts = [];
+  public List<ConsentLine> Consents = [];
+  public int ConsentsOwed;
+  public string CareNotes = "";
+  /// The guardians who act for them, then the contacts allowed to collect them.
+  public List<string> MayCollect = [];
+}
+
+/// The page's view of `person`.
+public FamilyMember DescribeFamilyMember(Principal person) {
+  var me = CurrentPrincipal();
+  var member = new FamilyMember {
+    PersonId = person.Id, Name = person.DisplayName != "" ? person.DisplayName : person.Email,
+    Minor = IsMinor(person), YouAct = me != null && IsGuardianOf(me, person),
+  };
+  var profile = DependantProfile.FirstOrDefault(p => p.Person == person);
+  if (profile != null) {
+    member.CareNotes = profile.CareNotes ?? "";
+    if (profile.BornOn != null) {
+      var born = profile.BornOn.Value;
+      var age = AgeAt(born, DateOnly.FromDateTime(DateTime.UtcNow));
+      member.Facts = profile.CameOfAgeAt != null || !NeedsGuardian(born)
+        ? $"Age {age}"
+        : $"Age {age} · comes of age on {MajorityOn(born).ToString("d MMMM yyyy")}";
+    }
+  }
+  foreach (var g in GuardiansOf(person)) {
+    member.Guardians.Add(new GuardianLine {
+      LinkId = g.Id, Name = g.Guardian.DisplayName != "" ? g.Guardian.DisplayName : g.Guardian.Email,
+      Relationship = g.Relationship.Label, Standing = g.Standing, You = me != null && g.Guardian.Id == me.Id,
+    });
+  }
+  foreach (var c in EmergencyContactsOf(person)) {
+    member.Contacts.Add(new ContactLine {
+      Id = c.Id, Name = c.Name, Phone = c.Phone, Relationship = c.Relationship ?? "", Priority = c.Priority, MayCollect = c.MayCollect,
+    });
+  }
+  foreach (var form in ConsentForm.Where(f => f.Active).OrderBy(f => f.Title).Take(50).ToList()) {
+    var line = new ConsentLine { FormId = form.Id, Title = form.Title, Wording = form.Wording };
+    var latest = LatestConsent(person, form);
+    if (latest != null && latest.Version == form.Version) {
+      line.Answer = latest.Answer.Label;
+      line.AnsweredBy = latest.AnsweredBy.DisplayName != "" ? latest.AnsweredBy.DisplayName : latest.AnsweredBy.Email;
+      line.At = latest.AnsweredAt;
+    } else {
+      member.ConsentsOwed = member.ConsentsOwed + 1;
+    }
+    member.Consents.Add(line);
+  }
+  member.MayCollect = MayCollectNames(person);
+  return member;
+}
+
+/// The people the caller looks after — acting for them first, then those they are kept informed about.
+public List<FamilyMember> MyFamily() {
+  var me = CurrentPrincipal();
+  var links = Guardianship.Where(g => g.Guardian == me && g.Standing != GuardianStanding.Ended)
+    .OrderBy(g => g.Standing).ThenBy(g => g.LinkedOn).Take(50).ToList();
+  List<FamilyMember> family = [];
+  foreach (var g in links) { family.Add(DescribeFamilyMember(g.Dependant)); }
+  return family;
+}
+
+/// The people who look after the caller.
+public List<GuardianLine> MyGuardians() {
+  return DescribeFamilyMember(CurrentPrincipal()).Guardians;
+}
+
+/// The people staff look up on site: everyone with a profile whose name holds `search` (every one when it is empty).
+[Authorize(SeesFamilies)]
+public List<FamilyMember> FamiliesFor(string search) {
+  var q = search.Trim();
+  var profiles = q == ""
+    ? DependantProfile.OrderBy(p => p.Person.DisplayName).Take(50).ToList()
+    : DependantProfile.Where(p => p.Person.DisplayName.Contains(q)).OrderBy(p => p.Person.DisplayName).Take(50).ToList();
+  List<FamilyMember> found = [];
+  foreach (var p in profiles) { found.Add(DescribeFamilyMember(p.Person)); }
+  return found;
+}
+
+/// A person by id, as the caller may see them — what a page's action hands back to the kit's functions.
+public Principal PersonById(Guid id) { return Principal.Single(p => p.Id == id); }

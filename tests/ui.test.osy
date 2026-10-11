@@ -1,0 +1,123 @@
+// The family pages, driven the way a parent and a teacher drive them. `osy test --pixels` photographs each (Ui.Shot).
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.Guardianship;
+
+[Test(LeoAtSchool)]
+void a_parent_sees_her_child_adds_another_and_answers_a_consent() {
+  Ui.Viewport(1280, 900);
+  Ui.SignInAs(Ana);
+  Ui.Visit("/family");
+  Assert.Visible("Leo");
+  Assert.Visible("Grandma Rut", within: "Emergency contacts for Leo");
+  Assert.Visible("May collect", within: "Grandma Rut");
+  Assert.Visible("2 consents to answer");
+  Ui.Shot("family");
+  Ui.Click("Give consent", within: "Photos at concerts");
+  Assert.Visible("Given by Ana", within: "Photos at concerts");
+  Assert.Visible("1 consent to answer");
+  Ui.Click("Add a child");
+  Assert.Dialog("Add a child");
+  Ui.Fill("Name", "Noor");
+  Ui.Fill("Date of birth", "2019-04-02");
+  Ui.Shot("family-add-child");
+  Ui.Click("Add them");
+  Assert.Visible("Noor is added. You act for them.");
+  Assert.Visible("Noor");
+}
+
+[Test(LeoAtSchool)]
+void a_parent_adds_a_contact_who_may_collect() {
+  Ui.Viewport(1280, 900);
+  Ui.SignInAs(Ana);
+  Ui.Visit("/family");
+  Ui.Click("Add a contact", within: "Leo");
+  Ui.Fill("Contact name", "Uncle Jo");
+  Ui.Fill("Phone", "+46 70 555 00 11");
+  Ui.Check("They may collect Leo");
+  Ui.Click("Save the contact");
+  Assert.Visible("Uncle Jo is an emergency contact for Leo.");
+  Assert.Visible("May collect", within: "Uncle Jo");
+}
+
+[Test(LeoAtSchool)]
+void a_parent_invites_the_other_parent_who_accepts_on_his_page() {
+  Ui.Viewport(1280, 900);
+  Ui.SignInAs(Ana);
+  Ui.Visit("/family");
+  Ui.Click("Invite someone", within: "Leo");
+  Ui.Fill("Their email address", "ben@school.test");
+  Ui.Shot("family-invite");
+  Ui.Click("Send the invitation");
+  Assert.Visible("Invitation sent to ben@school.test.");
+  Ui.SignInAs(Ben);
+  Ui.Visit("/family");
+  Assert.Visible("Ana invited you to look after Leo", within: "Invitations for you");
+  Ui.Shot("family-invitation");
+  Ui.Click("Accept");
+  Assert.Visible("You now look after Leo.");
+  Assert.Visible("You act for them", within: "Leo");
+}
+
+[Test(LeoAtSchool)]
+void a_teacher_finds_who_may_collect_and_who_to_call() {
+  Ui.Viewport(1280, 900);
+  Ui.SignInAs(Tom);
+  Ui.Visit("/family/lookup");
+  Ui.Fill("Find a person", "Leo");
+  Ui.Press("Enter");
+  Assert.Visible("Nut allergy", within: "Leo");
+  Assert.Visible("Grandma Rut", within: "Who to call about Leo");
+  Ui.Shot("family-lookup");
+}
+
+[Test(LeoAtSchool)]
+void the_lookup_is_staffs_alone() {
+  Ui.SignInAs(Sid);
+  Ui.Visit("/family/lookup");
+  Assert.Hidden("Nut allergy");
+}
+
+[Test(MiaAlmostOfAge)]
+void once_of_age_she_ends_it_herself_on_her_page() {
+  SchoolAtMajority.Stub(() => GuardianStanding.Informed);
+  TestClock.Advance(TimeSpan.FromDays(11));
+  runas (Oona) { Workflow.Settle(DependantProfile.Single(p => p.Person.DisplayName == "Mia")); }
+  Ui.Viewport(1280, 900);
+  Ui.SignInAs(Mia);
+  Ui.Visit("/family");
+  Assert.Visible("You decide for yourself");
+  Assert.Visible("Kept informed", within: "Who looks after you");
+  Ui.Shot("family-of-age");
+  Ui.Click("End", within: "Ana");
+  Assert.Visible("Ana no longer looks after you.");
+}
+
+[Test(LeoAtSchool)]
+void the_family_page_reads_on_a_phone_and_in_the_dark() {
+  Ui.Viewport(390, 844);
+  Ui.SignInAs(Ana);
+  Ui.Visit("/family");
+  Assert.Visible("Grandma Rut");
+  Assert.NoOverflow();
+  Ui.Shot("family-phone");
+  Ui.Viewport(1280, 900);
+  Ui.Theme("dark");
+  Ui.Visit("/family");
+  Assert.Visible("Grandma Rut");
+  Ui.Shot("family-dark");
+}
+
+[Test(School)]
+void a_parent_adding_her_first_child_sees_his_care_notes_at_once() {
+  Ui.Viewport(1280, 900);
+  Ui.SignInAs(Ana);
+  Ui.Visit("/family");
+  Assert.Visible("Nobody yet");
+  Ui.Click("Add a child");
+  Ui.Fill("Name", "Noor");
+  Ui.Fill("Date of birth", "2019-04-02");
+  Ui.Fill("Care notes", "Wears glasses for reading.");
+  Ui.Click("Add them");
+  Assert.Visible("Wears glasses for reading.", within: "Noor");
+}

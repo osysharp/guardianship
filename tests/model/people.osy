@@ -1,0 +1,100 @@
+// The school's people, the fixtures the tests start from, and the helpers they read through.
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.Mail;
+using Osysharp.Guardianship;
+
+User Member(string email, string name, AppRole role) {
+  var u = new User { Email = email, DisplayName = name, EmailVerifiedAt = DateTime.UtcNow };
+  new RoleGrant { Member = u, Role = role };
+  return u;
+}
+
+DateOnly Today() { return DateOnly.FromDateTime(DateTime.UtcNow); }
+
+/// The school: Ana and Ben (parents), Oona in the office, Tom who teaches, Sid who has nothing to do with anyone, Bea
+/// whom the office has barred, Ada, an adult pupil, and Una, whose address is not proven yet.
+[TestFixture]
+void School() { SeedSchool(); }
+
+/// Seeds the school and answers Ana — a fixture's reads obey the app's rules, so the layers below take her from here.
+User SeedSchool() {
+  var ana = Member("ana@school.test", "Ana", AppRole.Member);
+  Member("ben@school.test", "Ben", AppRole.Member);
+  Member("oona@school.test", "Oona", AppRole.Office);
+  Member("tom@school.test", "Tom", AppRole.Teacher);
+  Member("sid@school.test", "Sid", AppRole.Member);
+  var bea = Member("bea@school.test", "Bea", AppRole.Member);
+  new Barred { Person = bea };
+  Member("ada@school.test", "Ada", AppRole.Member);
+  // Una signed up and has not opened the link that proves her address.
+  new RoleGrant { Member = new User { Email = "una@school.test", DisplayName = "Una" }, Role = AppRole.Member };
+  new ConsentForm { Key = "photos", Title = "Photos at concerts", Wording = "We may use photos of your child from concerts on our website." };
+  new ConsentForm { Key = "first-aid", Title = "First aid", Wording = "Staff may give first aid and call for help." };
+  return ana;
+}
+
+/// …and Ana has added Leo, who is nine, and keeps his emergency contacts.
+[TestFixture]
+void LeoAtSchool() {
+  var ana = SeedSchool();
+  var leo = new User { Email = "leo@managed.invalid", DisplayName = "Leo" };
+  new Guardianship { Guardian = ana, Dependant = leo, Relationship = GuardianRelationship.Parent };
+  new DependantProfile { Person = leo, BornOn = Today().AddYears(-9), CareNotes = "Nut allergy — an auto-injector is in his bag." };
+  new EmergencyContact { Person = leo, Name = "Grandma Rut", Phone = "+46 70 123 45 67", Relationship = "Grandmother", MayCollect = true };
+  new EmergencyContact { Person = leo, Name = "Neighbour Kai", Phone = "+46 70 765 43 21", Priority = 2 };
+  new LessonNote { Pupil = leo, Text = "Leo kept time beautifully today." };
+}
+
+/// …and Mia, whose eighteenth birthday is in ten days, looked after by Ana.
+[TestFixture]
+void MiaAlmostOfAge() {
+  var ana = SeedSchool();
+  var mia = new User { Email = "mia@school.test", DisplayName = "Mia", EmailVerifiedAt = DateTime.UtcNow };
+  new Guardianship { Guardian = ana, Dependant = mia };
+  new DependantProfile { Person = mia, BornOn = Today().AddYears(-18).AddDays(10) };
+  new LessonNote { Pupil = mia, Text = "Mia's grade-eight piece is ready." };
+}
+
+principal Ana => User.Single(u => u.Email == "ana@school.test");
+principal Ben => User.Single(u => u.Email == "ben@school.test");
+principal Oona => User.Single(u => u.Email == "oona@school.test");
+principal Tom => User.Single(u => u.Email == "tom@school.test");
+principal Sid => User.Single(u => u.Email == "sid@school.test");
+principal Bea => User.Single(u => u.Email == "bea@school.test");
+principal Ada => User.Single(u => u.Email == "ada@school.test");
+principal Una => User.Single(u => u.Email == "una@school.test");
+principal Leo => User.Single(u => u.DisplayName == "Leo");
+principal Mia => User.Single(u => u.Email == "mia@school.test");
+
+/// Who the school says a person is — read as the office, which sees every account.
+User Person(string name) { return User.Single(u => u.DisplayName == name); }
+
+/// The link between two people by name, read as whoever calls it.
+Guardianship LinkOf(string guardian, string dependant) {
+  return Guardianship.Single(g => g.Guardian.DisplayName == guardian && g.Dependant.DisplayName == dependant);
+}
+
+/// How many times the school heard a line starting `start`.
+int HeardCount(string start) { Background.Settle(); return Heard.Count(h => h.Line.StartsWith(start)); }
+
+/// The token in the newest mail to `to` whose text carries `path`, or "" — the outbox stands in for the mailbox.
+string TokenIn(string to, string path) {
+  var mail = OutgoingMail.Where(m => m.To == to && m.Text != null && m.Text.Contains(path))
+    .OrderByDescending(m => m.CreatedAt).FirstOrDefault();
+  if (mail == null) { return ""; }
+  var text = mail.Text ?? "";
+  var at = text.IndexOf(path) + path.Length;
+  var end = at;
+  while (end < text.Length && text.Substring(end, 1) != " " && text.Substring(end, 1) != "\n" && text.Substring(end, 1) != ")") {
+    end = end + 1;
+  }
+  return text.Substring(at, end - at);
+}
+
+// Direct writes, as whoever calls them — what the security tests expect to be refused.
+void LinkDirectly(Principal guardian, Principal dependant) { new Guardianship { Guardian = guardian, Dependant = dependant }; }
+void SetStandingDirectly(Guardianship g, GuardianStanding s) { g.Standing = s; }
+void ConsentDirectly(Principal person, ConsentForm form) {
+  new Consent { Person = person, Form = form, Version = form.Version, Wording = form.Wording, Answer = ConsentAnswer.Given, AnsweredBy = person };
+}

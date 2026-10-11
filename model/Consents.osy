@@ -1,0 +1,119 @@
+// Consents: the questions an app asks a person — or, for a minor, their guardian — in words that are versioned, and
+// every answer kept with the words it answered.
+
+namespace Osysharp.Guardianship;
+
+using Osysharp.Identity;
+
+/// A question the app asks: photos on the website, first aid on site, travel with staff. Changing its words makes a new
+/// version, and the answers to the old one no longer count — everyone is asked again.
+public entity ConsentForm {
+  /// How the app's code asks about it — `HasConsent(person, "photos")`.
+  [Required, Unique("A consent form with that key already exists."), MaxLength(80)] string Key;
+  [Required, MaxLength(160)] string Title;
+  /// The words a person answers, exactly as shown.
+  [Required, MaxLength(8000)] string Wording;
+  int Version = 1;
+  /// Whether it is still asked. A retired form keeps its answers.
+  bool Active = true;
+
+  security {
+    allow read when IsAuthenticated;
+    allow create, update when ManagesGuardianships;
+    deny update Key;
+    deny update Wording, Version except via ReviseConsentForm;
+  }
+}
+
+/// An answer to a consent form. ⚠ Appended, never inserted.
+public enum ConsentAnswer {
+  [Label("Given")] Given,
+  [Label("Refused")] Refused,
+  [Label("Withdrawn")] Withdrawn,
+}
+
+/// One answer, about one person, to one version of a form — kept as it was given, with its words and who gave it. A
+/// later answer replaces it for what counts; nothing is edited or removed.
+public entity Consent {
+  [Required, Immutable] Principal Person;
+  [Required, Immutable] ConsentForm Form;
+  [Immutable] int Version;
+  [Required, Immutable, MaxLength(8000)] string Wording;
+  [Immutable] ConsentAnswer Answer;
+  /// The person themself, or a guardian answering for them.
+  [Required, Immutable] Principal AnsweredBy;
+  [Immutable] DateTime AnsweredAt = DateTime.UtcNow;
+
+  security {
+    allow read when IsAuthenticated where Person == user || AnsweredBy == user;
+    allow read when LooksAfterSomeone where KeptInformedOf(Person);
+    allow read when SeesFamilies;
+    allow create when IsAuthenticated;
+    deny create except via AnswerConsent;
+  }
+}
+
+/// A consent was given, refused or withdrawn.
+[Event("Consent answered")]
+public sealed class ConsentAnswered { public Consent Consent; }
+
+/// Change a form's words: a new version, which everyone is asked again.
+[Server, Authorize(ManagesGuardianships)]
+public ConsentForm ReviseConsentForm(ConsentForm form, string wording) {
+  var trimmed = wording.Trim();
+  if (trimmed == "") { throw new ValidationException("A consent form needs its words."); }
+  if (trimmed == form.Wording) { return form; }
+  form.Wording = trimmed;
+  form.Version = form.Version + 1;
+  UnitOfWork.Commit();
+  return form;
+}
+
+/// May the caller answer for `person`? The person themself once they decide for themself; while they are a minor, a
+/// guardian who acts for them, and only that guardian.
+public bool MayAnswerFor(Principal person) {
+  var me = CurrentPrincipal();
+  if (me == null) { return false; }
+  if (me.Id == person.Id) { return !IsMinor(person); }
+  return ActsForDependant(person);
+}
+
+/// Answer a consent form for `person` — yourself, or someone you act for. Throws the sentence to show.
+[Server, Authorize(IsAuthenticated)]
+public Consent AnswerConsent(Principal person, ConsentForm form, ConsentAnswer answer) {
+  if (!MayAnswerFor(person)) {
+    if (person.Id == CurrentPrincipal().Id) { throw new NotAuthorized("A guardian answers this for you until you come of age."); }
+    throw new NotAuthorized("You can answer only for yourself or for someone you act for.");
+  }
+  if (!form.Active) { throw new ValidationException("This form is no longer asked."); }
+  var consent = new Consent {
+    Person = person, Form = form, Version = form.Version, Wording = form.Wording, Answer = answer, AnsweredBy = CurrentPrincipal(),
+  };
+  UnitOfWork.Commit();
+  Raise(new ConsentAnswered { Consent = consent });
+  return consent;
+}
+
+/// The answer that counts for `person` on `form` — the latest — or null when they have not answered.
+public Consent? LatestConsent(Principal person, ConsentForm form) {
+  return Consent.Where(c => c.Person == person && c.Form == form).OrderByDescending(c => c.AnsweredAt).FirstOrDefault();
+}
+
+/// True when `person` has given consent to the CURRENT words of the form keyed `key`. False when they refused, withdrew,
+/// answered an older version, or never answered — and for a key no form has.
+public bool HasConsent(Principal person, string key) {
+  var form = ConsentForm.FirstOrDefault(f => f.Key == key);
+  if (form == null) { return false; }
+  var latest = LatestConsent(person, form);
+  return latest != null && latest.Answer == ConsentAnswer.Given && latest.Version == form.Version;
+}
+
+/// The active forms `person` has no current answer to — what a guardian is asked to look at.
+public List<ConsentForm> ConsentsOwed(Principal person) {
+  var owed = new List<ConsentForm>();
+  foreach (var form in ConsentForm.Where(f => f.Active).OrderBy(f => f.Title).Take(100).ToList()) {
+    var latest = LatestConsent(person, form);
+    if (latest == null || latest.Version != form.Version) { owed.Add(form); }
+  }
+  return owed;
+}

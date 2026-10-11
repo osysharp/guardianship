@@ -1,0 +1,35 @@
+// Osysharp.Guardianship — who looks after whom: the adults who act for a child (or for anyone who needs someone to act
+// for them), and what they may do.
+//
+// A guardian adds a child (an account the child cannot sign in to yet — Osysharp.UserAccounts' managed accounts), invites a
+// second guardian by address, gives or refuses the consents the app asks for, and keeps the emergency contacts and the
+// people who may collect the child. On the day the child comes of age the guardians' standing changes by itself — ended,
+// or narrowed to being kept informed — and from then on the person decides for themself.
+//
+// ⚑ THE APP SAYS WHO RUNS IT, AND USES ONE POLICY:
+//     policy ManagesGuardianships => IsDesk;            // corrects any link, manages the consent forms
+//     policy SeesFamilies => IsDesk || IsInstructor;    // reads links, emergency contacts and care notes on site
+//     policy MakesManagedAccounts => IsAuthenticated;   // Accounts: who may add a child
+//   …and then writes its own rules with `ActsForDependant(Child)` — "this person acts for that one".
+//
+// ⚑ NOBODY MAKES THEMSELF SOMEBODY'S GUARDIAN. A link is made by adding a child, by accepting an invitation from a
+//   guardian who already acts (or from the person themself, once of age), or by whoever manages guardianships. The
+//   app's own screening (`MayLinkAsGuardian`) is asked at every one of those but the last.
+package Osysharp.Guardianship {
+  version     "0.1.0";
+  minPlatform "0.9.0";
+  summary     "who acts for whom: a child added by their guardian as an account they cannot sign in to yet, a second guardian invited by address, standings (acts for them, kept informed, ended) that change by themselves when the child comes of age, consents the guardian gives on the child's behalf against versioned wording, emergency contacts and the people who may collect them, care notes for staff on site — and one policy, ActsForDependant, for an app's own rules.";
+  pairsWith   "Osysharp.ClassBookings: a guardian books classes, courses and lessons for the children they act for";
+  model "model/**/*.osy";
+  // The personal data its own fields hold (`[Classification(Personal.X)]`): an app maps a level onto its own
+  // classification, or leaves it to each row's own security. Care notes are health data (Art. 9).
+  personal Contact;
+  personal Identity;
+  personal Special;
+  use Osysharp.Identity@0;
+  use Osysharp.UserAccounts@1;   // the child's account — `MakeManagedAccount`, and giving it an address of its own later
+  use Osysharp.Mail@0;       // the invitation to a second guardian
+  use Osysharp.Ui;
+  use Osysharp.Workflow;     // the durable clock that changes the standings on the day the child comes of age
+  tests "tests";
+}

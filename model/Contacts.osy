@@ -1,0 +1,47 @@
+// Who to call when something happens, and who may collect a person — kept by the person or their guardians, read by
+// staff on site.
+
+namespace Osysharp.Guardianship;
+
+using Osysharp.Identity;
+
+/// Somebody to call about a person in an emergency — and, when `MayCollect`, somebody staff may hand a child over to.
+/// Kept by the person themself, by a guardian who acts for them, or by the desk; read by those and by `SeesFamilies`.
+public entity EmergencyContact {
+  [Required, Immutable] Principal Person;
+  [Required("Give the contact's name."), Classification(Personal.Contact), MaxLength(160)] string Name;
+  [Required("Give a number to call."), Classification(Personal.Contact), MaxLength(40)] string Phone;
+  /// Who they are to the person — "Grandmother", "Neighbour".
+  [MaxLength(80)] string? Relationship;
+  /// The order to call them in: 1 first.
+  [Min(1)] int Priority = 1;
+  /// Staff may hand the person over to them at the end of a session.
+  bool MayCollect = false;
+
+  security {
+    allow read when IsAuthenticated where Person == user;
+    allow read when LooksAfterSomeone where KeptInformedOf(Person);
+    allow read when SeesFamilies;
+    allow create, update, delete when IsAuthenticated where Person == user;
+    allow create, update, delete when ActsForSomeone where ActsForDependant(Person);
+    allow create, update, delete when ManagesGuardianships;
+    deny update Person;
+  }
+}
+
+/// The emergency contacts of `person`, first to call first — what staff on site read.
+public List<EmergencyContact> EmergencyContactsOf(Principal person) {
+  return EmergencyContact.Where(c => c.Person == person).OrderBy(c => c.Priority).ThenBy(c => c.Name).Take(20).ToList();
+}
+
+/// The people staff may hand `person` over to: the guardians who act for them, then the contacts allowed to collect.
+public List<string> MayCollectNames(Principal person) {
+  List<string> names = [];
+  foreach (var g in Guardianship.Where(g => g.Dependant == person && g.Standing == GuardianStanding.Acting).Take(20).ToList()) {
+    names.Add(g.Guardian.DisplayName != "" ? g.Guardian.DisplayName : g.Guardian.Email);
+  }
+  foreach (var c in EmergencyContact.Where(c => c.Person == person && c.MayCollect).OrderBy(c => c.Priority).Take(20).ToList()) {
+    names.Add(c.Name);
+  }
+  return names;
+}

@@ -1,0 +1,188 @@
+// Inviting someone to look after a person: a second parent, a grandparent who collects on Tuesdays, a carer an adult
+// chooses. The invitation is for an ADDRESS, and only an account that has proven that address answers it.
+
+namespace Osysharp.Guardianship;
+
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.Mail;
+using Osysharp.Workflow;
+
+/// Where an invitation stands. ⚠ Appended, never inserted.
+public enum GuardianInvitationState {
+  [Label("Waiting for an answer")] Open,
+  [Label("Accepted")] Accepted,
+  [Label("Declined")] Declined,
+  [Label("Withdrawn")] Withdrawn,
+}
+
+/// An invitation to look after `Dependant`, sent to an address. The standing it offers is fixed when it is sent.
+public entity GuardianInvitation {
+  [Required, Immutable] Principal Dependant;
+  /// The address invited — normalised; only an account that has proven it may answer.
+  [Required, Immutable, Classification(Personal.Contact), MaxLength(255)] string Email;
+  [Immutable] GuardianRelationship Relationship = GuardianRelationship.Parent;
+  [Immutable] GuardianStanding Standing = GuardianStanding.Acting;
+  [Required, Immutable] Principal InvitedBy;
+  [Immutable] DateTime SentAt = DateTime.UtcNow;
+  [Immutable] DateTime ExpiresAt;
+  GuardianInvitationState State = GuardianInvitationState.Open;
+  DateTime? AnsweredAt;
+  /// Whether its mail has gone into the outbox — moved by its run alone.
+  GuardianInvitationMail Mail;                       // no default — GuardianInvitationMailing owns it
+
+  security {
+    allow read when IsAuthenticated where InvitedBy == user || Dependant == user;
+    allow read when LooksAfterSomeone where KeptInformedOf(Dependant);
+    // The invitee sees it once they have proven they are its address.
+    allow read when IsAuthenticated && user.EmailVerifiedAt != null where Email == user.Email;
+    allow read when ManagesGuardianships;
+    allow create, update when IsAuthenticated;
+    deny create except via InviteGuardian;
+    deny update State, AnsweredAt except via AcceptGuardianInvitation, DeclineGuardianInvitation, WithdrawGuardianInvitation;
+  }
+}
+
+/// Where an invitation's mail stands. ⚠ Appended, never inserted.
+public enum GuardianInvitationMail { Sending, Sent }
+
+/// Mails an invitation — as the system, on a clock due at once, so the person inviting needs no right to the outbox and
+/// the mail never holds the commit that saved the invitation.
+workflow GuardianInvitationMailing {
+  Tracks    = GuardianInvitation.Mail;
+  Autostart = true;
+  Initial   = Sending;
+
+  state Sending {
+    Expire { Within = TimeSpan.Zero; Accrues = false; }
+    on Expire {
+      var invitation = this.Item;
+      SendMail(App.Setting<GuardianshipSetup>().Mails.Invitation(invitation, DisplayNameOf(invitation.InvitedBy), DisplayNameOf(invitation.Dependant),
+                                                                 AccountsLink("/family")),
+               "guardian-invitation-" + invitation.Id.ToString("N"));
+      goto Sent;
+    }
+  }
+
+  terminal success Sent { }
+}
+
+/// An invitation was sent — its mail goes out at once; an app that also texts or notifies hears this.
+[Event("Guardian invited")]
+public sealed class GuardianInvited { public GuardianInvitation Invitation; }
+
+/// The mail an invitation sends. Derive and override to write your own; `link` opens the app's family page.
+public class GuardianshipMails {
+  public virtual MailMessage Invitation(GuardianInvitation invitation, string inviter, string dependant, string link) {
+    var what = invitation.Standing == GuardianStanding.Acting ? "look after" : "be kept informed about";
+    return new MailMessage {
+      To = [invitation.Email],
+      Subject = inviter + " invited you to " + what + " " + dependant,
+      Text = inviter + " invited you to " + what + " " + dependant + ".\n\n"
+           + "Sign in (or create an account) with this address, then open " + link + " to accept or decline.\n\n"
+           + "The invitation is open until " + invitation.ExpiresAt.ToString("d MMMM yyyy") + ". If you were not expecting it, ignore this mail.",
+    };
+  }
+}
+
+string DisplayNameOf(Principal p) { return p.DisplayName != "" ? p.DisplayName : p.Email; }
+
+/// May the caller invite someone to look after `dependant`? A guardian who acts for them, the person themself once they
+/// decide for themself, or whoever manages guardianships.
+public bool MayInviteFor(Principal dependant) {
+  if (ManagesGuardianships || ActsForDependant(dependant)) { return true; }
+  var me = CurrentPrincipal();
+  return me != null && me.Id == dependant.Id && !IsMinor(dependant);
+}
+
+/// Invite `address` to look after `dependant` — with the standing it offers (acting for them, or kept informed). Mailed
+/// at once. Throws the sentence to show.
+[Server, Authorize(IsAuthenticated)]
+public GuardianInvitation InviteGuardian(Principal dependant, string address,
+                                         GuardianRelationship relationship = GuardianRelationship.Parent,
+                                         GuardianStanding standing = GuardianStanding.Acting) {
+  if (!MayInviteFor(dependant)) { throw new NotAuthorized("You can invite someone only for a person you act for."); }
+  if (standing == GuardianStanding.Ended) { throw new ValidationException("Invite them to act for, or to be kept informed about, the person."); }
+  var email = NormalisedEmail(address);
+  if (!LooksLikeEmail(email)) { throw new ValidationException("That does not look like an email address."); }
+  if (dependant.Email == email) { throw new ValidationException("Nobody can be their own guardian."); }
+  if (Guardianship.Any(g => g.Dependant == dependant && g.Guardian.Email == email && g.Standing == standing)) {
+    throw new ValidationException("They already look after them.");
+  }
+  if (GuardianInvitation.Any(i => i.Dependant == dependant && i.Email == email && i.State == GuardianInvitationState.Open
+                                  && i.ExpiresAt > DateTime.UtcNow)) {
+    throw new ValidationException("An invitation to that address is already waiting for an answer.");
+  }
+  var invitation = new GuardianInvitation {
+    Dependant = dependant, Email = email, Relationship = relationship, Standing = standing, InvitedBy = CurrentPrincipal(),
+    ExpiresAt = DateTime.UtcNow + App.Setting<GuardianshipSetup>().InvitationValidFor,
+  };
+  UnitOfWork.Commit();
+  Raise(new GuardianInvited { Invitation = invitation });
+  return invitation;
+}
+
+/// The open invitations to the caller's own proven address.
+public List<GuardianInvitation> MyGuardianInvitations() {
+  var me = CurrentPrincipal();
+  if (me == null || me.EmailVerifiedAt == null) { return []; }
+  var now = DateTime.UtcNow;
+  return GuardianInvitation.Where(i => i.Email == me.Email && i.State == GuardianInvitationState.Open && i.ExpiresAt > now)
+    .OrderByDescending(i => i.SentAt).Take(20).ToList();
+}
+
+GuardianInvitation OpenFor(GuardianInvitation invitation) {
+  var me = CurrentPrincipal();
+  if (me == null || me.EmailVerifiedAt == null || me.Email != invitation.Email) {
+    throw new NotAuthorized("This invitation was sent to another address.");
+  }
+  if (invitation.State != GuardianInvitationState.Open) { throw new ValidationException("This invitation has already been answered."); }
+  if (invitation.ExpiresAt <= DateTime.UtcNow) { throw new ValidationException("This invitation has expired. Ask for a new one."); }
+  return invitation;
+}
+
+/// Accept an invitation sent to your own, proven, address: you come to look after the person, with the standing it
+/// offered — when the app's screening allows it. Throws the sentence to show.
+[Server, Authorize(IsAuthenticated)]
+public Guardianship AcceptGuardianInvitation(GuardianInvitation invitation) {
+  OpenFor(invitation);
+  var me = CurrentPrincipal();
+  var dependant = invitation.Dependant;
+  if (!MayLinkAsGuardian(me, dependant)) { throw new NotAuthorized("You cannot be linked as a guardian here. Ask the desk."); }
+  invitation.State = GuardianInvitationState.Accepted;
+  invitation.AnsweredAt = DateTime.UtcNow;
+  var link = Guardianship.FirstOrDefault(g => g.Guardian == me && g.Dependant == dependant);
+  if (link != null) {
+    link.Relationship = invitation.Relationship;
+    link.Standing = invitation.Standing;
+    link.LinkedOn = DateTime.UtcNow;
+    link.ChangedAt = DateTime.UtcNow;
+    link.ChangeReason = "Accepted an invitation";
+  } else {
+    link = new Guardianship { Guardian = me, Dependant = dependant, Relationship = invitation.Relationship, Standing = invitation.Standing };
+  }
+  UnitOfWork.Commit();
+  Raise(new GuardianLinked { Guardianship = link });
+  return link;
+}
+
+/// Decline an invitation sent to your own address.
+[Server, Authorize(IsAuthenticated)]
+public void DeclineGuardianInvitation(GuardianInvitation invitation) {
+  OpenFor(invitation);
+  invitation.State = GuardianInvitationState.Declined;
+  invitation.AnsweredAt = DateTime.UtcNow;
+  UnitOfWork.Commit();
+}
+
+/// Withdraw an invitation you sent, before it is answered (or the desk, any).
+[Server, Authorize(IsAuthenticated)]
+public void WithdrawGuardianInvitation(GuardianInvitation invitation) {
+  if (!ManagesGuardianships && invitation.InvitedBy.Id != CurrentPrincipal().Id) {
+    throw new NotAuthorized("Only the person who sent it can withdraw it.");
+  }
+  if (invitation.State != GuardianInvitationState.Open) { throw new ValidationException("This invitation has already been answered."); }
+  invitation.State = GuardianInvitationState.Withdrawn;
+  invitation.AnsweredAt = DateTime.UtcNow;
+  UnitOfWork.Commit();
+}

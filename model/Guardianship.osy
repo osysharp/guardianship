@@ -1,0 +1,238 @@
+// The link between a guardian and the person they look after, its standing, and the policies an app builds on.
+
+namespace Osysharp.Guardianship;
+
+using Osysharp.Identity;
+
+/// THE SEAM — who looks after every link: makes and corrects any of them, ends any of them, declares somebody of age,
+/// and manages the consent forms. Nobody, until the app says: `policy ManagesGuardianships => IsDesk;`.
+virtual policy ManagesGuardianships => false;
+
+/// THE SEAM — staff who need to know, on site, who looks after a person and how to reach them: they read the links, the
+/// emergency contacts, the people who may collect them, the care notes and the consents. Whoever manages guardianships,
+/// until the app widens it: `policy SeesFamilies => ManagesGuardianships || IsInstructor;`.
+virtual policy SeesFamilies => ManagesGuardianships;
+
+/// THE SEAM — the app's own screening: may `guardian` come to act for `dependant` at all (a check the app keeps, a
+/// person it has barred)? Asked when a child is added and when an invitation is accepted. Whoever manages guardianships
+/// links past it. Everybody passes until the app says otherwise:
+/// `policy MayLinkAsGuardian(Principal guardian, Principal dependant) => !Barred.Any(b => b.Person == guardian);`.
+virtual policy MayLinkAsGuardian(Principal guardian, Principal dependant) => guardian != dependant;
+
+/// True when the signed-in person acts for `dependant` — books for them, answers for them, changes what is theirs. The
+/// policy an app writes its own rules with: `allow read when ActsForSomeone where ActsForDependant(Student);`.
+public policy ActsForDependant(Principal dependant) =>
+  Guardianship.Any(g => g.Dependant == dependant && g.Guardian == user && g.Standing == GuardianStanding.Acting);
+
+/// True when the signed-in person acts for `dependant` or is kept informed about them — reads what is theirs, changes
+/// nothing. `allow read when LooksAfterSomeone where KeptInformedOf(Student);`.
+public policy KeptInformedOf(Principal dependant) =>
+  Guardianship.Any(g => g.Dependant == dependant && g.Guardian == user && g.Standing != GuardianStanding.Ended);
+
+/// True when the signed-in person acts for anybody at all — WHO a rule built on `ActsForDependant` is for, so the
+/// question about each row is asked only of guardians: `allow update when ActsForSomeone where ActsForDependant(Child);`.
+public policy ActsForSomeone =>
+  Guardianship.Any(g => g.Guardian == user && g.Standing == GuardianStanding.Acting);
+
+/// True when the signed-in person looks after anybody at all (acting or kept informed) — the `when` beside a
+/// `where KeptInformedOf(…)`.
+public policy LooksAfterSomeone =>
+  Guardianship.Any(g => g.Guardian == user && g.Standing != GuardianStanding.Ended);
+
+/// How the app configures the kit: `app.Guardianship = new GuardianshipSetup { AgeOfMajority = 16 };`.
+[AppSetting("Guardianship")]
+public class GuardianshipSetup {
+  /// The age from which a person decides for themself. 18 unless the app says otherwise.
+  public int AgeOfMajority = 18;
+  /// What a guardian who acted for a child becomes on the day the child comes of age: `Ended` (the default — an adult's
+  /// affairs are their own), or `Informed` (the guardian still reads, and acts for them no longer). The person can end
+  /// it, or ask the guardian back, from then on.
+  public GuardianStanding AtMajority = GuardianStanding.Ended;
+  /// How long an invitation to become a guardian stays open.
+  public TimeSpan InvitationValidFor = TimeSpan.FromDays(14);
+  /// The mail an invitation sends — derive and override to write your own.
+  public GuardianshipMails Mails = new GuardianshipMails();
+}
+
+/// What a guardian is to the person they look after — what the app shows, and what the desk asks about.
+/// ⚠ Appended, never inserted: rows store the member.
+public enum GuardianRelationship {
+  [Label("Parent")] Parent,
+  [Label("Legal guardian")] LegalGuardian,
+  [Label("Carer")] Carer,
+  [Label("Relative")] Relative,
+  [Label("Other")] Other,
+}
+
+/// What a guardian may do. ⚠ Appended, never inserted.
+public enum GuardianStanding {
+  /// Books, answers and changes things for them — `ActsForDependant`.
+  [Label("Acts for them")] Acting,
+  /// Reads what is theirs and changes nothing — `KeptInformedOf`.
+  [Label("Kept informed")] Informed,
+  /// Neither. The link is kept as the record that it was.
+  [Label("Ended")] Ended,
+}
+
+/// One guardian and one person they look after. A guardian may look after many people and a person may have many
+/// guardians; a pair is one row, kept when it ends (its `Standing` says so) and reused if it starts again.
+[Unique(Guardian, Dependant, "That person is already linked as a guardian of them.")]
+public entity Guardianship {
+  [Required, Immutable] Principal Guardian;
+  [Required, Immutable] Principal Dependant;
+  GuardianRelationship Relationship = GuardianRelationship.Parent;
+  GuardianStanding Standing = GuardianStanding.Acting;
+  DateTime LinkedOn = DateTime.UtcNow;
+  /// When it last changed standing, and why — "Came of age", "Stepped back", "Court order".
+  DateTime? ChangedAt;
+  [MaxLength(300)] string? ChangeReason;
+
+  invariant Guardian != Dependant message "Nobody can be their own guardian.";
+
+  security {
+    // The guardian, the person, and anyone else who looks after the person (a second parent sees the first).
+    allow read when IsAuthenticated where Guardian == user || Dependant == user;
+    allow read when LooksAfterSomeone where KeptInformedOf(Dependant);
+    allow read when SeesFamilies;
+    // Every write is one of the kit's functions — each decides who may.
+    allow create, update when IsAuthenticated;
+    deny create except via LinkGuardian, AddDependant, AcceptGuardianInvitation;
+    deny update Relationship, LinkedOn except via LinkGuardian, AcceptGuardianInvitation;
+    deny update Standing, ChangedAt, ChangeReason except via LinkGuardian, AcceptGuardianInvitation, ChangeStanding, ComeOfAge;
+    // A link made in error is removed by whoever manages them; any other end keeps the row.
+    allow delete when ManagesGuardianships;
+  }
+}
+
+/// A guardian came to act for, or to be kept informed about, a person — a new link, or one that started again.
+[Event("Guardian linked")]
+public sealed class GuardianLinked { public Guardianship Guardianship; }
+
+/// A link changed standing — narrowed, ended, or (by the person themself, or the desk) restored.
+[Event("Guardian standing changed")]
+public sealed class GuardianStandingChanged { public Guardianship Guardianship; public GuardianStanding From; }
+
+// ── ages ──────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// Whole years lived on `on` by someone born on `bornOn`. The birthday counts on the day itself; someone born on
+/// 29 February has their birthday on 1 March in years with no 29 February.
+public int AgeAt(DateOnly bornOn, DateOnly on) {
+  var years = on.Year - bornOn.Year;
+  if (on.Month < bornOn.Month || (on.Month == bornOn.Month && on.Day < bornOn.Day)) {
+    years = years - 1;
+  }
+  return years;
+}
+
+/// True when someone born on `bornOn` is younger than the app's age of majority on `on` (today, UTC, when not given).
+public bool NeedsGuardian(DateOnly bornOn, DateOnly? on = null) {
+  var day = on ?? DateOnly.FromDateTime(DateTime.UtcNow);
+  return AgeAt(bornOn, day) < App.Setting<GuardianshipSetup>().AgeOfMajority;
+}
+
+/// The day someone born on `bornOn` comes of age. 29 February's children come of age on 1 March in common years.
+public DateOnly MajorityOn(DateOnly bornOn) {
+  var age = App.Setting<GuardianshipSetup>().AgeOfMajority;
+  var year = bornOn.Year + age;
+  if (bornOn.Month == 2 && bornOn.Day == 29 && !DateTime.IsLeapYear(year)) { return new DateOnly(year, 3, 1); }
+  return new DateOnly(year, bornOn.Month, bornOn.Day);
+}
+
+/// True when `person` is known to be under age: a profile that says so (or one with no date yet). A person with no
+/// profile decides for themself — an adult who has asked a carer to act for them.
+public bool IsMinor(Principal person) {
+  var profile = DependantProfile.FirstOrDefault(p => p.Person == person);
+  if (profile == null || profile.CameOfAgeAt != null) { return false; }
+  if (profile.BornOn == null) { return true; }
+  return NeedsGuardian(profile.BornOn.Value);
+}
+
+// ── links ─────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// Make or restart a link — the desk's way, for a guardian it has checked itself. Linking a pair that already acts is
+/// answered with that link and raises nothing.
+[Server, Authorize(ManagesGuardianships)]
+public Guardianship LinkGuardian(Principal guardian, Principal dependant,
+                                 GuardianRelationship relationship = GuardianRelationship.Parent,
+                                 GuardianStanding standing = GuardianStanding.Acting) {
+  if (guardian.Id == dependant.Id) { throw new ValidationException("Nobody can be their own guardian."); }
+  var existing = Guardianship.FirstOrDefault(g => g.Guardian == guardian && g.Dependant == dependant);
+  if (existing != null) {
+    if (existing.Standing == standing && existing.Relationship == relationship) { return existing; }
+    var from = existing.Standing;
+    existing.Relationship = relationship;
+    existing.Standing = standing;
+    existing.LinkedOn = DateTime.UtcNow;
+    existing.ChangedAt = DateTime.UtcNow;
+    existing.ChangeReason = "Linked by the desk";
+    UnitOfWork.Commit();
+    if (from == GuardianStanding.Ended) { Raise(new GuardianLinked { Guardianship = existing }); }
+    else { Raise(new GuardianStandingChanged { Guardianship = existing, From = from }); }
+    return existing;
+  }
+  var link = new Guardianship { Guardian = guardian, Dependant = dependant, Relationship = relationship, Standing = standing };
+  UnitOfWork.Commit();
+  Raise(new GuardianLinked { Guardianship = link });
+  return link;
+}
+
+/// May the caller change `link` to `standing`? Whoever manages guardianships may make any change. The guardian may step
+/// back (from acting to kept informed, or to ended) and never forward. The person may change it any way once they decide
+/// for themself — never while they are a minor.
+public bool MayChangeStanding(Guardianship link, GuardianStanding standing) {
+  if (ManagesGuardianships) { return true; }
+  var me = CurrentPrincipal();
+  if (me == null) { return false; }
+  if (link.Guardian.Id == me.Id) { return (int)standing > (int)link.Standing; }
+  if (link.Dependant.Id == me.Id) { return !IsMinor(link.Dependant); }
+  return false;
+}
+
+/// Change a link's standing: a guardian steps back, a person of age ends a guardianship or keeps a parent informed, the
+/// desk acts on a court order. Throws the sentence to show when the caller may not.
+[Server, Authorize(IsAuthenticated)]
+public Guardianship ChangeStanding(Guardianship link, GuardianStanding standing, string reason = "") {
+  if (link.Standing == standing) { return link; }
+  if (!MayChangeStanding(link, standing)) {
+    if (link.Dependant.Id == CurrentPrincipal().Id) {
+      throw new NotAuthorized("Your guardians look after this until you come of age.");
+    }
+    throw new NotAuthorized("You can step back from looking after someone, but not change anyone else's link.");
+  }
+  var from = link.Standing;
+  link.Standing = standing;
+  link.ChangedAt = DateTime.UtcNow;
+  link.ChangeReason = reason.Trim() == "" ? null : reason.Trim();
+  UnitOfWork.Commit();
+  if (from == GuardianStanding.Ended) { Raise(new GuardianLinked { Guardianship = link }); }
+  else { Raise(new GuardianStandingChanged { Guardianship = link, From = from }); }
+  return link;
+}
+
+// ── reading ───────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// The links of the people who look after `dependant` (acting or kept informed), the first linked first — what the
+/// caller may see of them.
+public List<Guardianship> GuardiansOf(Principal dependant) {
+  return Guardianship.Where(g => g.Dependant == dependant && g.Standing != GuardianStanding.Ended)
+    .OrderBy(g => g.LinkedOn).Take(50).ToList();
+}
+
+/// The people `guardian` acts for, the first linked first — the people a "book for" choice offers.
+public List<Principal> DependantsOf(Principal guardian) {
+  return Guardianship.Where(g => g.Guardian == guardian && g.Standing == GuardianStanding.Acting)
+    .OrderBy(g => g.LinkedOn).Select(g => g.Dependant).Take(50).ToList();
+}
+
+/// The caller and everybody the caller acts for — themself first.
+public List<Principal> MeAndMyDependants() {
+  var me = CurrentPrincipal();
+  List<Principal> people = [me];
+  foreach (var d in DependantsOf(me)) { people.Add(d); }
+  return people;
+}
+
+/// Whether `guardian` acts for `dependant` now.
+public bool IsGuardianOf(Principal guardian, Principal dependant) {
+  return Guardianship.Any(g => g.Guardian == guardian && g.Dependant == dependant && g.Standing == GuardianStanding.Acting);
+}

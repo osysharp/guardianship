@@ -1,0 +1,132 @@
+// Inviting a second guardian: for an address, answered only by an account that has proven it.
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.Mail;
+using Osysharp.Workflow;
+using Osysharp.Guardianship;
+
+GuardianInvitation InvitationTo(string email) { return GuardianInvitation.Single(i => i.Email == email); }
+
+[Test(LeoAtSchool)]
+void a_parent_invites_the_other_parent_who_accepts_and_acts_for_him_too() {
+  runas (Ana) {
+    var sent = InviteGuardian(Leo, " Ben@School.test ");
+    Assert.Equal("ben@school.test", sent.Email);
+    Assert.Equal(GuardianInvitationState.Open, sent.State);
+  }
+  runas (Oona) { Workflow.Settle(InvitationTo("ben@school.test")); }
+  runas (AuthBootstrap) {
+    var mail = OutgoingMail.Single(m => m.To == "ben@school.test");
+    Assert.Contains("Ana invited you to look after Leo", mail.Subject);
+    Assert.Contains("/family", mail.Text!);
+  }
+  runas (Ben) {
+    Assert.Equal(1, MyGuardianInvitations().Count);
+    var link = AcceptGuardianInvitation(MyGuardianInvitations()[0]);
+    Assert.Equal(GuardianStanding.Acting, link.Standing);
+    Assert.True(ActsForDependant(Leo));
+    Assert.Equal(0, MyGuardianInvitations().Count);
+  }
+  Assert.Equal(1, HeardCount("invited ben@school.test"));
+  Assert.Equal(1, HeardCount("linked Ben > Leo"));
+}
+
+[Test(LeoAtSchool)]
+void a_grandparent_invited_to_be_kept_informed_reads_and_changes_nothing() {
+  runas (Ana) { InviteGuardian(Leo, "sid@school.test", GuardianRelationship.Relative, GuardianStanding.Informed); }
+  runas (Sid) {
+    AcceptGuardianInvitation(MyGuardianInvitations()[0]);
+    Assert.True(KeptInformedOf(Leo));
+    Assert.False(ActsForDependant(Leo));
+    Assert.Equal(1, LessonNote.Count());
+    Assert.Throws<NotAuthorized>(() => InviteGuardian(Leo, "ada@school.test"));
+  }
+}
+
+[Test(LeoAtSchool)]
+void only_the_invited_address_answers_it() {
+  runas (Ana) { InviteGuardian(Leo, "ben@school.test"); }
+  GuardianInvitation? sent = null;
+  runas (Oona) { sent = InvitationTo("ben@school.test"); }
+  runas (Sid) {
+    Assert.Equal(0, MyGuardianInvitations().Count);
+    Assert.Throws(() => AcceptGuardianInvitation(sent!));
+    Assert.False(ActsForDependant(Leo));
+  }
+}
+
+[Test(LeoAtSchool)]
+void an_address_nobody_has_proven_cannot_answer() {
+  runas (Ana) { InviteGuardian(Leo, "una@school.test"); }
+  GuardianInvitation? sent = null;
+  runas (Oona) { sent = InvitationTo("una@school.test"); }
+  runas (Una) {
+    Assert.Equal(0, MyGuardianInvitations().Count);
+    Assert.Throws(() => AcceptGuardianInvitation(sent!));          // not hers to see, so not hers to answer
+    Assert.False(ActsForDependant(Leo));
+  }
+}
+
+[Test(LeoAtSchool)]
+void an_invitation_lapses_after_its_time() {
+  runas (Ana) { InviteGuardian(Leo, "ben@school.test"); }
+  TestClock.Advance(TimeSpan.FromDays(15));
+  runas (Ben) {
+    Assert.Equal(0, MyGuardianInvitations().Count);
+    Assert.Contains("expired", Assert.Throws(() => AcceptGuardianInvitation(InvitationTo("ben@school.test"))).Message);
+  }
+}
+
+[Test(LeoAtSchool)]
+void a_stranger_cannot_invite_anyone_for_him_and_nobody_writes_an_invitation_by_hand() {
+  runas (Sid) {
+    Assert.Throws<NotAuthorized>(() => InviteGuardian(Leo, "sid@school.test"));
+    Assert.Denied(() => {
+      new GuardianInvitation { Dependant = Leo, Email = "sid@school.test", InvitedBy = Sid, ExpiresAt = DateTime.UtcNow.AddDays(1) };
+      UnitOfWork.Commit();
+    });
+  }
+}
+
+[Test(LeoAtSchool)]
+void a_child_cannot_invite_a_guardian_for_themself() {
+  runas (Leo) { Assert.Throws<NotAuthorized>(() => InviteGuardian(Leo, "sid@school.test")); }
+}
+
+[Test(School)]
+void an_adult_invites_a_carer_for_themself() {
+  runas (Ada) { InviteGuardian(Ada, "sid@school.test", GuardianRelationship.Carer); }
+  runas (Sid) {
+    AcceptGuardianInvitation(MyGuardianInvitations()[0]);
+    Assert.True(ActsForDependant(Ada));
+  }
+}
+
+[Test(LeoAtSchool)]
+void the_school_screening_holds_at_acceptance() {
+  runas (Ana) { InviteGuardian(Leo, "bea@school.test"); }
+  runas (Bea) {
+    Assert.Contains("cannot be linked", Assert.Throws(() => AcceptGuardianInvitation(MyGuardianInvitations()[0])).Message);
+    Assert.False(ActsForDependant(Leo));
+  }
+}
+
+[Test(LeoAtSchool)]
+void declined_and_withdrawn_invitations_cannot_be_accepted() {
+  runas (Ana) { InviteGuardian(Leo, "ben@school.test"); }
+  runas (Ben) { DeclineGuardianInvitation(MyGuardianInvitations()[0]); }
+  runas (Ben) { Assert.Contains("already been answered", Assert.Throws(() => AcceptGuardianInvitation(InvitationTo("ben@school.test"))).Message); }
+  runas (Ana) {
+    InviteGuardian(Leo, "sid@school.test");
+    WithdrawGuardianInvitation(InvitationTo("sid@school.test"));
+  }
+  runas (Sid) { Assert.Equal(0, MyGuardianInvitations().Count); }
+}
+
+[Test(LeoAtSchool)]
+void a_second_invitation_to_the_same_address_waits_for_the_first() {
+  runas (Ana) {
+    InviteGuardian(Leo, "ben@school.test");
+    Assert.Contains("already waiting", Assert.Throws(() => InviteGuardian(Leo, "ben@school.test")).Message);
+  }
+}

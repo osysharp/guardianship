@@ -1,0 +1,336 @@
+// The family page: the people you look after — their guardians, emergency contacts, consents and care notes — adding a
+// child, inviting someone, answering an invitation, and (once you decide for yourself) who looks after you.
+//
+// ⚑ EVERY LOOK TOKEN COMES FROM THE THEME: no colour, size or font is written here, so a look (`kits/look-*`) re-skins it.
+
+namespace Osysharp.Guardianship;
+
+using Osysharp.Identity;
+using Osysharp.Ui;
+
+/// The family page. In a test: `Ui.Click("Add a child")`, `Ui.Fill("Name", "Noor")`, `Ui.Fill("Date of birth",
+/// "2019-04-02")`, `Ui.Click("Add them")` — or, on a child's card, `Ui.Click("Add a contact", within: "Leo")`,
+/// `Ui.Click("Invite someone", within: "Leo")`, `Ui.Click("Give consent", within: "Photos at concerts")`.
+[Composable]
+public component FamilyScreen() {
+  List<FamilyMember> family = [];
+  List<GuardianLine> mine = [];
+  List<GuardianInvitation> invitations = [];
+  bool decidesForSelf = false;
+  string notice = "";
+  // adding a child
+  bool adding = false;
+  string childName = "";
+  DateOnly? childBorn = null;
+  string childNotes = "";
+  string addProblem = "";
+  // a contact
+  Guid contactFor = Guid.Empty;
+  string contactForName = "";
+  string contactName = "";
+  string contactPhone = "";
+  string contactRelationship = "";
+  bool contactCollects = false;
+  string contactProblem = "";
+  // an invitation
+  Guid inviteFor = Guid.Empty;
+  string inviteForName = "";
+  string inviteAddress = "";
+  bool inviteInformedOnly = false;
+  string inviteProblem = "";
+  // stepping back
+  Guid steppingBack = Guid.Empty;
+  string steppingBackName = "";
+
+  on mount { Load(); }
+
+  action Load() {
+    family = MyFamily();
+    mine = MyGuardians();
+    invitations = MyGuardianInvitations();
+    decidesForSelf = !IsMinor(CurrentPrincipal());
+  }
+
+  action StartAdd() { adding = true; childName = ""; childBorn = null; childNotes = ""; addProblem = ""; }
+  action StopAdd() { adding = false; }
+  action Add() {
+    addProblem = "";
+    try {
+      var link = AddDependant(childName, childBorn, careNotes: childNotes);
+      notice = link.Dependant.DisplayName + " is added. You act for them.";
+      adding = false;
+      Load();
+    } catch (Exception ex) { addProblem = ex.Message; }
+  }
+
+  action StartContact(FamilyMember m) {
+    contactFor = m.PersonId; contactForName = m.Name;
+    contactName = ""; contactPhone = ""; contactRelationship = ""; contactCollects = false; contactProblem = "";
+  }
+  action StopContact() { contactFor = Guid.Empty; }
+  action SaveContact() {
+    contactProblem = "";
+    try {
+      var person = PersonById(contactFor);
+      var next = EmergencyContactsOf(person).Count + 1;
+      new EmergencyContact {
+        Person = person, Name = contactName.Trim(), Phone = contactPhone.Trim(),
+        Relationship = contactRelationship.Trim() == "" ? null : contactRelationship.Trim(), Priority = next, MayCollect = contactCollects,
+      };
+      UnitOfWork.Commit();
+      notice = contactName.Trim() + " is an emergency contact for " + contactForName + ".";
+      contactFor = Guid.Empty;
+      Load();
+    } catch (Exception ex) { UnitOfWork.Discard(); contactProblem = ex.Message; }
+  }
+  action RemoveContact(ContactLine c) {
+    try {
+      EmergencyContact.Single(x => x.Id == c.Id).Delete();
+      UnitOfWork.Commit();
+      Load();
+    } catch (Exception ex) { UnitOfWork.Discard(); notice = ex.Message; }
+  }
+
+  action StartInvite(FamilyMember m) {
+    inviteFor = m.PersonId; inviteForName = m.Name; inviteAddress = ""; inviteInformedOnly = false; inviteProblem = "";
+  }
+  action StopInvite() { inviteFor = Guid.Empty; }
+  action Invite() {
+    inviteProblem = "";
+    try {
+      var sent = InviteGuardian(PersonById(inviteFor), inviteAddress,
+                                standing: inviteInformedOnly ? GuardianStanding.Informed : GuardianStanding.Acting);
+      notice = "Invitation sent to " + sent.Email + ".";
+      inviteFor = Guid.Empty;
+      Load();
+    } catch (Exception ex) { inviteProblem = ex.Message; }
+  }
+
+  action Answer(FamilyMember m, ConsentLine c, ConsentAnswer answer) {
+    try {
+      AnswerConsent(PersonById(m.PersonId), ConsentForm.Single(f => f.Id == c.FormId), answer);
+      Load();
+    } catch (Exception ex) { notice = ex.Message; }
+  }
+
+  action Accept(GuardianInvitation i) {
+    try {
+      var link = AcceptGuardianInvitation(i);
+      notice = "You now look after " + link.Dependant.DisplayName + ".";
+      Load();
+    } catch (Exception ex) { notice = ex.Message; }
+  }
+  action Decline(GuardianInvitation i) {
+    try { DeclineGuardianInvitation(i); Load(); } catch (Exception ex) { notice = ex.Message; }
+  }
+
+  action Change(GuardianLine g, GuardianStanding standing) {
+    try {
+      ChangeStanding(Guardianship.Single(x => x.Id == g.LinkId), standing);
+      notice = standing == GuardianStanding.Ended ? g.Name + " no longer looks after you." : g.Name + " is kept informed from now on.";
+      Load();
+    } catch (Exception ex) { notice = ex.Message; }
+  }
+  action AskStepBack(FamilyMember m) { steppingBack = m.PersonId; steppingBackName = m.Name; }
+  action StopStepBack() { steppingBack = Guid.Empty; }
+  action StepBack() {
+    try {
+      var me = CurrentPrincipal();
+      ChangeStanding(Guardianship.Single(x => x.Guardian == me && x.Dependant.Id == steppingBack), GuardianStanding.Informed, "Stepped back");
+      notice = "You are kept informed about " + steppingBackName + " from now on.";
+      steppingBack = Guid.Empty;
+      Load();
+    } catch (Exception ex) { notice = ex.Message; steppingBack = Guid.Empty; }
+  }
+
+  render {
+    Stack(gap: 6, maxW: "56rem", w: "100%", mx: "auto", px: 4, py: 6) {
+      PageHead("Family", subtitle: "The people you look after, who to call, and what you have agreed to for them.");
+      if (notice != "") { Alert(notice); }
+
+      if (invitations.Count > 0) {
+        Card(title: "Invitations for you") {
+          Stack(gap: 0, role: UiRole.List, label: "Invitations for you") {
+            foreach (var i in invitations) {
+              Row(gap: 3, align: Align.Center, py: 3, borderBW: 1, border: Colors.Border, wrap: Wrapping.Wrap, role: UiRole.ListItem,
+                  label: i.Dependant.DisplayName) {
+                Stack(gap: 1, grow: 1, minW: "0") {
+                  Text(i.InvitedBy.DisplayName + " invited you to " + (i.Standing == GuardianStanding.Acting ? "look after " : "be kept informed about ")
+                       + i.Dependant.DisplayName, fontWeight: FontWeight.Medium);
+                  Text("Open until " + i.ExpiresAt.ToString("d MMMM yyyy"), fontSize: FontSize.Label, color: Colors.TextSecondary);
+                }
+                Row(gap: 2) {
+                  Button("Decline", onPress: () => Decline(i), tone: Tone.Ghost, size: Size.Sm);
+                  Button("Accept", onPress: () => Accept(i), tone: Tone.Primary, size: Size.Sm);
+                }
+              }
+            }
+          }
+        }
+      }
+
+      Stack(gap: 4, label: "The people you look after") {
+        Row(gap: 2, align: Align.Center, justify: Justify.Between, wrap: Wrapping.Wrap) {
+          SectionLabel("The people you look after");
+          Button("Add a child", onPress: StartAdd, tone: Tone.Primary, size: Size.Sm);
+        }
+        if (family.Count == 0) {
+          EmptyState("Nobody yet", body: "Add a child to book for them, keep their emergency contacts and answer for them.");
+        }
+        foreach (var m in family) {
+          FamilyCard(m, onContact: () => StartContact(m), onInvite: () => StartInvite(m), onStepBack: () => AskStepBack(m),
+                     onRemoveContact: RemoveContact, onAnswer: Answer);
+        }
+      }
+
+      if (mine.Count > 0) {
+        Card(title: "Who looks after you",
+             subtitle: decidesForSelf ? "You decide for yourself: keep someone informed, or end it." : "Your guardians look after this until you come of age.") {
+          Stack(gap: 0, role: UiRole.List, label: "Who looks after you") {
+            foreach (var g in mine) {
+              Row(gap: 3, align: Align.Center, py: 3, borderBW: 1, border: Colors.Border, wrap: Wrapping.Wrap, role: UiRole.ListItem, label: g.Name) {
+                Stack(gap: 1, grow: 1, minW: "0") {
+                  Text(g.Name, fontWeight: FontWeight.Medium);
+                  Text(g.Relationship, fontSize: FontSize.Label, color: Colors.TextSecondary);
+                }
+                Badge(g.Standing.Label, tone: g.Standing == GuardianStanding.Acting ? Tone.Primary : Tone.Default);
+                if (decidesForSelf) {
+                  Row(gap: 2) {
+                    if (g.Standing == GuardianStanding.Acting) {
+                      Button("Keep informed only", onPress: () => Change(g, GuardianStanding.Informed), tone: Tone.Ghost, size: Size.Sm);
+                    }
+                    Button("End", onPress: () => Change(g, GuardianStanding.Ended), tone: Tone.Danger, size: Size.Sm);
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    if (adding) {
+      Dialog("Add a child", onDismiss: StopAdd,
+             subtitle: "They get an account of their own that they cannot sign in to yet. You act for them, and can hand it over later.") {
+        Field("Name", value: childName, placeholder: "Their name as you use it");
+        DatePicker("Date of birth", value: childBorn, clearable: true, hint: "Tells us when they come of age and decide for themselves.");
+        TextAreaField("Care notes", value: childNotes, rows: 3, hint: "Allergies, medication, anything staff must know. Staff on site read this.");
+        if (addProblem != "") { Alert(addProblem, tone: Tone.Danger); }
+        Row(gap: 2, justify: Justify.End) {
+          Button("Cancel", onPress: StopAdd, tone: Tone.Ghost);
+          Button("Add them", onPress: Add, tone: Tone.Primary);
+        }
+      }
+    }
+    if (contactFor != Guid.Empty) {
+      Dialog("An emergency contact for " + contactForName, onDismiss: StopContact,
+             subtitle: "Who staff call if they cannot reach you. Contacts are called in the order you add them.") {
+        Field("Contact name", value: contactName, placeholder: "Grandma Rut");
+        Field("Phone", value: contactPhone, type: "tel", placeholder: "+46 70 123 45 67");
+        Field("Who they are to them", value: contactRelationship, placeholder: "Grandmother");
+        Checkbox("They may collect " + contactForName, value: contactCollects);
+        if (contactProblem != "") { Alert(contactProblem, tone: Tone.Danger); }
+        Row(gap: 2, justify: Justify.End) {
+          Button("Cancel", onPress: StopContact, tone: Tone.Ghost);
+          Button("Save the contact", onPress: SaveContact, tone: Tone.Primary);
+        }
+      }
+    }
+    if (steppingBack != Guid.Empty) {
+      Dialog("Step back from " + steppingBackName + "?", onDismiss: StopStepBack,
+             subtitle: "You will still be kept informed, and no longer act for them. Only someone who acts for them, or the desk, can make you act for them again.") {
+        Row(gap: 2, justify: Justify.End) {
+          Button("Cancel", onPress: StopStepBack, tone: Tone.Ghost);
+          Button("Step back", onPress: StepBack, tone: Tone.Danger);
+        }
+      }
+    }
+    if (inviteFor != Guid.Empty) {
+      Dialog("Invite someone to look after " + inviteForName, onDismiss: StopInvite,
+             subtitle: "A mail goes to the address. They accept once signed in with it.") {
+        Field("Their email address", value: inviteAddress, type: "email", placeholder: "name@example.com");
+        Checkbox("Keep them informed only — they read, and cannot act", value: inviteInformedOnly);
+        if (inviteProblem != "") { Alert(inviteProblem, tone: Tone.Danger); }
+        Row(gap: 2, justify: Justify.End) {
+          Button("Cancel", onPress: StopInvite, tone: Tone.Ghost);
+          Button("Send the invitation", onPress: Invite, tone: Tone.Primary);
+        }
+      }
+    }
+  }
+}
+
+/// One person you look after, on the family page.
+[Composable]
+public component FamilyCard(FamilyMember m, Action onContact, Action onInvite, Action onStepBack,
+                            Action<ContactLine> onRemoveContact, Action<FamilyMember, ConsentLine, ConsentAnswer> onAnswer) {
+  render {
+    Card(title: m.Name, subtitle: m.Facts) {
+      Stack(gap: 5, label: m.Name) {
+        Row(gap: 2, wrap: Wrapping.Wrap) {
+          Badge(m.YouAct ? "You act for them" : "You are kept informed", tone: m.YouAct ? Tone.Primary : Tone.Default);
+          if (m.ConsentsOwed > 0) { Badge(m.ConsentsOwed == 1 ? "1 consent to answer" : $"{m.ConsentsOwed} consents to answer", tone: Tone.Warning); }
+        }
+        if (m.CareNotes != "") {
+          Stack(gap: 1) {
+            SectionLabel("Care notes");
+            Text(m.CareNotes);
+          }
+        }
+        Stack(gap: 1) {
+          SectionLabel("Looked after by");
+          foreach (var g in m.Guardians) {
+            Row(gap: 2, align: Align.Center, wrap: Wrapping.Wrap) {
+              Text(g.You ? g.Name + " (you)" : g.Name, fontWeight: FontWeight.Medium);
+              Text(g.Relationship, fontSize: FontSize.Label, color: Colors.TextSecondary);
+              Badge(g.Standing.Label, tone: g.Standing == GuardianStanding.Acting ? Tone.Primary : Tone.Default);
+            }
+          }
+        }
+        Stack(gap: 1, role: UiRole.List, label: "Emergency contacts for " + m.Name) {
+          SectionLabel("Emergency contacts");
+          if (m.Contacts.Count == 0) { Hint("No emergency contacts yet."); }
+          foreach (var c in m.Contacts) {
+            Row(gap: 3, align: Align.Center, py: 2, borderBW: 1, border: Colors.Border, wrap: Wrapping.Wrap, role: UiRole.ListItem, label: c.Name) {
+              Stack(gap: 0, grow: 1, minW: "0") {
+                Text(c.Name, fontWeight: FontWeight.Medium);
+                Text(c.Relationship == "" ? c.Phone : c.Relationship + " · " + c.Phone, fontSize: FontSize.Label, color: Colors.TextSecondary);
+              }
+              if (c.MayCollect) { Badge("May collect", tone: Tone.Success); }
+              if (m.YouAct) { Button("Remove", onPress: () => onRemoveContact(c), tone: Tone.Ghost, size: Size.Sm, announceAs: "Remove " + c.Name); }
+            }
+          }
+        }
+        if (m.Consents.Count > 0) {
+          Stack(gap: 1, role: UiRole.List, label: "Consents for " + m.Name) {
+            SectionLabel("Consents");
+            foreach (var c in m.Consents) {
+              Stack(gap: 2, py: 2, borderBW: 1, border: Colors.Border, role: UiRole.ListItem, label: c.Title) {
+                Row(gap: 2, align: Align.Center, justify: Justify.Between, wrap: Wrapping.Wrap) {
+                  Text(c.Title, fontWeight: FontWeight.Medium);
+                  if (c.Answer == "") { Badge("Not answered", tone: Tone.Warning); }
+                  else { Badge(c.Answer + " by " + c.AnsweredBy, tone: c.Answer == "Given" ? Tone.Success : Tone.Default); }
+                }
+                Text(c.Wording, fontSize: FontSize.Label, color: Colors.TextSecondary);
+                if (m.YouAct) {
+                  Row(gap: 2) {
+                    if (c.Answer != "Given") { Button("Give consent", onPress: () => onAnswer(m, c, ConsentAnswer.Given), tone: Tone.Primary, size: Size.Sm); }
+                    if (c.Answer == "") { Button("Refuse", onPress: () => onAnswer(m, c, ConsentAnswer.Refused), tone: Tone.Ghost, size: Size.Sm); }
+                    if (c.Answer == "Given") { Button("Withdraw", onPress: () => onAnswer(m, c, ConsentAnswer.Withdrawn), tone: Tone.Ghost, size: Size.Sm); }
+                  }
+                }
+              }
+            }
+          }
+        }
+        if (m.YouAct) {
+          Row(gap: 2, wrap: Wrapping.Wrap) {
+            Button("Add a contact", onPress: onContact, tone: Tone.Default, size: Size.Sm);
+            Button("Invite someone", onPress: onInvite, tone: Tone.Default, size: Size.Sm);
+            Button("Step back", onPress: onStepBack, tone: Tone.Ghost, size: Size.Sm);
+          }
+        }
+      }
+    }
+  }
+}

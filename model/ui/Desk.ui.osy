@@ -1,0 +1,74 @@
+// The page staff read on site: who looks after a child, who may collect them, who to call, what they have agreed to and
+// what staff must know — searched by name. Read-only: staff change nothing here.
+
+namespace Osysharp.Guardianship;
+
+using Osysharp.Identity;
+using Osysharp.Ui;
+
+/// Staff's lookup. In a test: `Ui.Fill("Find a person", "Leo")`, `Ui.Press("Enter")`, then
+/// `Assert.Visible("May collect", within: "Leo")`.
+[Composable]
+public component FamilyLookup() {
+  string search = "";
+  List<FamilyMember> found = [];
+
+  on mount { Find(); }
+  action Find() { found = FamiliesFor(search); }
+
+  render {
+    Stack(gap: 6, maxW: "56rem", w: "100%", mx: "auto", px: 4, py: 6) {
+      PageHead("Families", subtitle: "Who looks after each person, who may collect them, and who to call.");
+      Row(gap: 2, align: Align.End) {
+        Box(grow: 1, minW: "0") { Field("Find a person", value: search, placeholder: "A name", onEnter: Find); }
+        Button("Find", onPress: Find, tone: Tone.Default);
+      }
+      if (found.Count == 0) { EmptyState("Nobody found", body: "Try part of their name."); }
+      foreach (var m in found) {
+        Card(title: m.Name, subtitle: m.Facts) {
+          Stack(gap: 4, label: m.Name) {
+            if (m.CareNotes != "") { Alert(m.CareNotes, title: "Care notes", tone: Tone.Warning); }
+            Stack(gap: 1) {
+              SectionLabel("May collect");
+              if (m.MayCollect.Count == 0) { Hint("Nobody is named to collect them."); }
+              Row(gap: 2, wrap: Wrapping.Wrap) { foreach (var n in m.MayCollect) { Badge(n, tone: Tone.Success); } }
+            }
+            Stack(gap: 1) {
+              SectionLabel("Looked after by");
+              foreach (var g in m.Guardians) {
+                Row(gap: 2, align: Align.Center, wrap: Wrapping.Wrap) {
+                  Text(g.Name, fontWeight: FontWeight.Medium);
+                  Text(g.Relationship, fontSize: FontSize.Label, color: Colors.TextSecondary);
+                  Badge(g.Standing.Label, tone: g.Standing == GuardianStanding.Acting ? Tone.Primary : Tone.Default);
+                }
+              }
+            }
+            Stack(gap: 1, role: UiRole.List, label: "Who to call about " + m.Name) {
+              SectionLabel("Who to call");
+              if (m.Contacts.Count == 0) { Hint("No emergency contacts."); }
+              foreach (var c in m.Contacts) {
+                Row(gap: 3, align: Align.Center, wrap: Wrapping.Wrap, role: UiRole.ListItem, label: c.Name) {
+                  Text($"{c.Priority}.", color: Colors.TextMuted);
+                  Text(c.Name, fontWeight: FontWeight.Medium);
+                  Text(c.Relationship, fontSize: FontSize.Label, color: Colors.TextSecondary);
+                  Text(c.Phone, fontFamily: Font.Mono);
+                }
+              }
+            }
+            if (m.Consents.Count > 0) {
+              Stack(gap: 1) {
+                SectionLabel("Consents");
+                Row(gap: 2, wrap: Wrapping.Wrap) {
+                  foreach (var c in m.Consents) {
+                    Badge(c.Title + ": " + (c.Answer == "" ? "not answered" : c.Answer.ToLower()),
+                          tone: c.Answer == "Given" ? Tone.Success : (c.Answer == "" ? Tone.Warning : Tone.Danger));
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

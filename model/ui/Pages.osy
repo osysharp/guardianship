@@ -1,0 +1,19 @@
+// The kit's pages, served at their routes in the app's own shell and theme.
+//
+// ⚑ AN APP TAKES ONE OVER by declaring a component of the same name — with a `[Route]` of its own it is served there
+//   instead, in its own frame; without one, the kit's route serves the app's version:
+//
+//     [Route("/household")] [Title("Household")] [Render(CSR)]
+//     component FamilyPage() { render { MyFrame { FamilyScreen(); } } }
+//
+//   The screens (`FamilyScreen`, `FamilyLookup`, `FamilyCard`) are the parts to place on a page of the app's own.
+
+namespace Osysharp.Guardianship;
+
+using Osysharp.Ui;
+
+[Route("/family")] [Title("Family")] [Render(CSR)]
+public component FamilyPage() { render { FamilyScreen(); } }
+
+[Route("/family/lookup")] [Title("Families")] [Authorize(SeesFamilies)] [Render(CSR)]
+public component FamilyLookupPage() { render { FamilyLookup(); } }

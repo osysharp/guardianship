@@ -1,0 +1,114 @@
+// Ages and coming of age: the arithmetic, and the clock that changes the standings on the day.
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.Workflow;
+using Osysharp.Guardianship;
+
+[Test]
+void the_birthday_counts_on_the_day_itself() {
+  var born = new DateOnly(2010, 6, 15);
+  Assert.Equal(14, AgeAt(born, new DateOnly(2025, 6, 14)));
+  Assert.Equal(15, AgeAt(born, new DateOnly(2025, 6, 15)));
+  Assert.Equal(15, AgeAt(born, new DateOnly(2026, 1, 31)));
+}
+
+[Test]
+void a_leap_day_child_comes_of_age_on_the_first_of_march_in_a_common_year() {
+  Assert.Equal(new DateOnly(2026, 3, 1), MajorityOn(new DateOnly(2008, 2, 29)));
+  Assert.Equal(new DateOnly(2010, 2, 28), MajorityOn(new DateOnly(1992, 2, 28)));
+  Assert.Equal(17, AgeAt(new DateOnly(2008, 2, 29), new DateOnly(2026, 2, 28)));
+  Assert.Equal(18, AgeAt(new DateOnly(2008, 2, 29), new DateOnly(2026, 3, 1)));
+}
+
+[Test]
+void the_apps_age_of_majority_moves_the_threshold() {
+  SchoolAgeOfMajority.Stub(() => 16);
+  var born = Today().AddYears(-17);
+  Assert.False(NeedsGuardian(born));
+  SchoolAgeOfMajority.Stub(() => 18);
+  Assert.True(NeedsGuardian(born));
+}
+
+[Test(MiaAlmostOfAge)]
+void on_her_eighteenth_birthday_her_parents_standing_ends_by_itself() {
+  runas (Ana) { Assert.True(ActsForDependant(Mia)); }
+  TestClock.Advance(TimeSpan.FromDays(11));
+  runas (Oona) { Workflow.Settle(DependantProfile.Single(p => p.Person.DisplayName == "Mia")); }
+  Background.Settle();
+  runas (Ana) {
+    Assert.False(ActsForDependant(Mia));
+    Assert.False(KeptInformedOf(Mia));
+    Assert.Equal(0, LessonNote.Count());
+  }
+  runas (Oona) {
+    var profile = DependantProfile.Single(p => p.Person.DisplayName == "Mia");
+    Assert.Equal(AgeStage.OfAge, profile.Stage);
+    Assert.NotNull(profile.CameOfAgeAt);
+    Assert.Equal("Came of age", LinkOf("Ana", "Mia").ChangeReason);
+  }
+  Assert.Equal(1, HeardCount("of age Mia"));
+  Assert.Equal(1, HeardCount("standing Ana Acting > Ended"));
+}
+
+[Test(MiaAlmostOfAge)]
+void nothing_changes_the_day_before() {
+  TestClock.Advance(TimeSpan.FromDays(9));
+  runas (Oona) { Workflow.Settle(DependantProfile.Single(p => p.Person.DisplayName == "Mia")); }
+  runas (Ana) { Assert.True(ActsForDependant(Mia)); }
+}
+
+[Test(MiaAlmostOfAge)]
+void a_school_that_keeps_parents_informed_narrows_the_standing_instead() {
+  SchoolAtMajority.Stub(() => GuardianStanding.Informed);
+  TestClock.Advance(TimeSpan.FromDays(11));
+  runas (Oona) { Workflow.Settle(DependantProfile.Single(p => p.Person.DisplayName == "Mia")); }
+  runas (Ana) {
+    Assert.False(ActsForDependant(Mia));
+    Assert.True(KeptInformedOf(Mia));
+    Assert.Equal(1, LessonNote.Count());
+  }
+  // …and Mia, of age now, decides: her mother is no longer kept informed.
+  runas (Mia) { ChangeStanding(LinkOf("Ana", "Mia"), GuardianStanding.Ended, "My own business now"); }
+  runas (Ana) { Assert.False(KeptInformedOf(Mia)); }
+}
+
+[Test(MiaAlmostOfAge)]
+void before_she_comes_of_age_she_cannot_end_it_herself() {
+  runas (Mia) {
+    Assert.True(IsMinor(Mia));
+    Assert.Throws<NotAuthorized>(() => ChangeStanding(LinkOf("Ana", "Mia"), GuardianStanding.Ended));
+  }
+}
+
+[Test(LeoAtSchool)]
+void a_corrected_date_of_birth_re_arms_the_clock_at_once() {
+  runas (Ana) { SetBornOn(DependantProfile.Single(p => p.Person == Leo), Today().AddYears(-19)); }
+  runas (Oona) { Workflow.Settle(DependantProfile.Single(p => p.Person.DisplayName == "Leo")); }
+  Background.Settle();
+  runas (Ana) { Assert.False(ActsForDependant(Leo)); }
+  Assert.Equal(1, HeardCount("of age Leo"));
+}
+
+[Test(LeoAtSchool)]
+void only_his_guardians_or_the_office_set_his_date_of_birth() {
+  runas (Sid) {
+    Assert.Throws(() => SetBornOn(DependantProfile.Single(p => p.Person == Leo), Today().AddYears(-30)));
+  }
+  runas (Tom) {
+    Assert.Throws<NotAuthorized>(() => SetBornOn(DependantProfile.Single(p => p.Person == Leo), Today().AddYears(-30)));
+  }
+}
+
+[Test(LeoAtSchool)]
+void the_office_declares_him_of_age() {
+  runas (Oona) {
+    DeclareOfAge(DependantProfile.Single(p => p.Person == Leo));
+    Workflow.Settle(DependantProfile.Single(p => p.Person == Leo));
+  }
+  runas (Ana) { Assert.False(ActsForDependant(Leo)); }
+}
+
+[Test(LeoAtSchool)]
+void a_parent_cannot_declare_their_child_of_age() {
+  runas (Ana) { Assert.Throws<NotAuthorized>(() => DeclareOfAge(DependantProfile.Single(p => p.Person == Leo))); }
+}

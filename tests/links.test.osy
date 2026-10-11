@@ -1,0 +1,132 @@
+// Links: how a guardian comes to act for a child, who may change it, and what an app's own rule sees through it.
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.Guardianship;
+
+[Test(School)]
+void a_parent_adds_a_child_who_cannot_sign_in_and_acts_for_them() {
+  runas (Ana) {
+    var link = AddDependant("  Noor ", Today().AddYears(-7), careNotes: "Wears glasses for reading.");
+    Assert.Equal(GuardianStanding.Acting, link.Standing);
+    Assert.Equal("Noor", link.Dependant.DisplayName);
+    Assert.True(ActsForDependant(link.Dependant));
+    Assert.Equal(1, DependantsOf(Ana).Count);
+  }
+  // (That she reads the care notes of the child she just added is shown on her page: ui.test.osy,
+  // a_parent_adding_her_first_child_sees_his_care_notes_at_once.)
+  runas (Oona) {
+    var noor = Person("Noor");
+    Assert.True(IsManaged(noor));
+    Assert.Null(noor.PasswordHash);
+    Assert.Equal(AgeStage.Minor, DependantProfile.Single(p => p.Person == noor).Stage);
+    Assert.Equal("Wears glasses for reading.", DependantProfile.Single(p => p.Person == noor).CareNotes);
+    Assert.True(IsMinor(noor));
+  }
+  Assert.Equal(1, HeardCount("linked Ana > Noor"));
+}
+
+[Test(School)]
+void a_date_of_birth_in_the_future_is_refused() {
+  runas (Ana) {
+    Assert.Contains("cannot be in the future", Assert.Throws(() => AddDependant("Noor", Today().AddDays(3))).Message);
+  }
+}
+
+[Test(School)]
+void nobody_makes_themself_somebodys_guardian() {
+  runas (Sid) {
+    Assert.Denied(() => { LinkDirectly(Sid, Ada); UnitOfWork.Commit(); });
+    Assert.Throws<NotAuthorized>(() => LinkGuardian(Sid, Ada));
+    Assert.False(ActsForDependant(Ada));
+  }
+  runas (Oona) { Assert.Equal(0, Guardianship.Count()); }
+}
+
+[Test(School)]
+void someone_the_school_barred_cannot_take_on_a_child() {
+  runas (Bea) {
+    Assert.Contains("cannot be linked", Assert.Throws(() => AddDependant("Kim", Today().AddYears(-5))).Message);
+  }
+  runas (Oona) { Assert.Equal(0, Guardianship.Count()); }
+}
+
+[Test(School)]
+void the_office_links_a_guardian_it_has_checked_and_relinking_changes_nothing() {
+  runas (Oona) {
+    var link = LinkGuardian(Ada, Sid, GuardianRelationship.Carer);
+    Assert.Equal(GuardianStanding.Acting, link.Standing);
+    Assert.Equal(link.Id, LinkGuardian(Ada, Sid, GuardianRelationship.Carer).Id);
+    Assert.Equal(1, Guardianship.Count());
+  }
+  runas (Ada) { Assert.True(ActsForDependant(Sid)); }
+  Assert.Equal(1, HeardCount("linked Ada > Sid"));
+}
+
+[Test(LeoAtSchool)]
+void the_standing_changes_only_through_the_kit() {
+  runas (Ana) { Assert.Denied(() => { SetStandingDirectly(LinkOf("Ana", "Leo"), GuardianStanding.Informed); UnitOfWork.Commit(); }); }
+  runas (Oona) { Assert.Denied(() => { SetStandingDirectly(LinkOf("Ana", "Leo"), GuardianStanding.Ended); UnitOfWork.Commit(); }); }
+}
+
+[Test(LeoAtSchool)]
+void a_guardian_steps_back_and_never_forward() {
+  runas (Ana) {
+    ChangeStanding(LinkOf("Ana", "Leo"), GuardianStanding.Informed, "Ben does the lessons now");
+    Assert.False(ActsForDependant(Leo));
+    Assert.True(KeptInformedOf(Leo));
+    Assert.Throws<NotAuthorized>(() => ChangeStanding(LinkOf("Ana", "Leo"), GuardianStanding.Acting));
+    Assert.Equal("Ben does the lessons now", LinkOf("Ana", "Leo").ChangeReason);
+  }
+  Assert.Equal(1, HeardCount("standing Ana Acting > Informed"));
+}
+
+[Test(LeoAtSchool)]
+void a_child_cannot_end_their_guardianship_and_nobody_else_can_end_somebody_elses() {
+  runas (Leo) {
+    Assert.Contains("until you come of age", Assert.Throws(() => ChangeStanding(LinkOf("Ana", "Leo"), GuardianStanding.Ended)).Message);
+  }
+  runas (Oona) { LinkGuardian(Ben, Leo); }
+  runas (Ben) { Assert.Throws<NotAuthorized>(() => ChangeStanding(LinkOf("Ana", "Leo"), GuardianStanding.Ended)); }
+  runas (Oona) { ChangeStanding(LinkOf("Ana", "Leo"), GuardianStanding.Ended, "Court order"); }
+  runas (Ana) { Assert.False(KeptInformedOf(Leo)); }
+}
+
+[Test(School)]
+void an_adult_ends_a_carers_link_themself() {
+  runas (Oona) { LinkGuardian(Sid, Ada, GuardianRelationship.Carer); }
+  runas (Ada) {
+    Assert.False(IsMinor(Ada));
+    ChangeStanding(LinkOf("Sid", "Ada"), GuardianStanding.Ended, "I manage on my own now");
+  }
+  runas (Sid) { Assert.False(ActsForDependant(Ada)); }
+}
+
+[Test(LeoAtSchool)]
+void the_schools_own_rule_shows_the_note_to_those_who_look_after_him_and_nobody_else() {
+  runas (Ana) { Assert.Equal(1, LessonNote.Count(n => n.Pupil == Leo)); }
+  runas (Sid) { Assert.Equal(0, LessonNote.Count()); }
+  runas (Oona) { LinkGuardian(Ben, Leo, standing: GuardianStanding.Informed); }
+  runas (Ben) {
+    Assert.Equal(1, LessonNote.Count());
+    Assert.False(ActsForDependant(Leo));
+  }
+}
+
+[Test(LeoAtSchool)]
+void a_second_parent_sees_the_first_and_a_stranger_sees_no_links() {
+  runas (Oona) { LinkGuardian(Ben, Leo); }
+  runas (Ben) { Assert.Equal(2, GuardiansOf(Leo).Count); }
+  runas (Leo) { Assert.Equal(2, GuardiansOf(Leo).Count); }
+  runas (Sid) { Assert.Equal(0, Guardianship.Count()); }
+}
+
+[Test(LeoAtSchool)]
+void a_teacher_reads_the_links_and_care_notes_but_changes_nothing() {
+  runas (Tom) {
+    Assert.Equal(1, GuardiansOf(Leo).Count);
+    Assert.Contains("Nut allergy", DependantProfile.Single(p => p.Person == Leo).CareNotes!);
+    Assert.Throws<NotAuthorized>(() => ChangeStanding(LinkOf("Ana", "Leo"), GuardianStanding.Ended));
+    Assert.Throws<NotAuthorized>(() => LinkGuardian(Tom, Leo));
+  }
+  runas (Sid) { Assert.Equal(0, DependantProfile.Count()); }
+}
