@@ -16,8 +16,8 @@
 //   guardian who already acts (or from the person themself, once of age), or by whoever manages guardianships. The
 //   app's own screening (`MayLinkAsGuardian`) is asked at every one of those but the last.
 package Osysharp.Guardianship {
-  version     "0.1.0";
-  minPlatform "0.9.0";
+  version     "0.2.0";
+  minPlatform "0.14.0";
   summary     "who acts for whom: a child added by their guardian as an account they cannot sign in to yet, a second guardian invited by address, standings (acts for them, kept informed, ended) that change by themselves when the child comes of age, consents the guardian gives on the child's behalf against versioned wording, emergency contacts and the people who may collect them, care notes for staff on site — and one policy, ActsForDependant, for an app's own rules.";
   pairsWith   "Osysharp.ClassBookings: a guardian books classes, courses and lessons for the children they act for";
   model "model/**/*.osy";
