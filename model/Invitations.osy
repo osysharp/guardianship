@@ -127,7 +127,10 @@ public List<GuardianInvitation> MyGuardianInvitations() {
   var me = CurrentPrincipal();
   if (me == null || me.EmailVerifiedAt == null) { return []; }
   var now = DateTime.UtcNow;
+  // The people each names come with it, read in the same query: the page says who invited you to look after whom, and
+  // an invitee's page holds no other copy of either.
   return GuardianInvitation.Where(i => i.Email == me.Email && i.State == GuardianInvitationState.Open && i.ExpiresAt > now)
+    .Include(i => i.Dependant).Include(i => i.InvitedBy)
     .OrderByDescending(i => i.SentAt).Take(20).ToList();
 }
 
