@@ -88,3 +88,79 @@ change) shaped consent forms.
 `model/` is the kit; `tests/` is a music school that uses it — 53 tests as real people (parents, a teacher, the office, a
 stranger, a barred adult), seven of them driving the pages. `osy test` in `tests/`; `--pixels` for the
 screenshots above.
+
+## Examples
+
+Taken from this package's own tests, which compile and run on every release.
+
+```osy
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.Workflow;
+using Osysharp.Guardianship;
+
+[Test]
+void the_birthday_counts_on_the_day_itself() {
+  var born = new DateOnly(2010, 6, 15);
+  Assert.Equal(14, AgeAt(born, new DateOnly(2025, 6, 14)));
+  Assert.Equal(15, AgeAt(born, new DateOnly(2025, 6, 15)));
+  Assert.Equal(15, AgeAt(born, new DateOnly(2026, 1, 31)));
+}
+```
+
+From [`tests/ageing.test.osy`](tests/ageing.test.osy).
+
+```osy
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.Guardianship;
+
+[Test(LeoAtSchool)]
+void a_parent_gives_consent_for_her_child_and_the_answer_keeps_its_words() {
+  runas (Ana) {
+    Assert.Equal(2, ConsentsOwed(Leo).Count);
+    var c = AnswerConsent(Leo, Form("photos"), ConsentAnswer.Given);
+    Assert.Equal("Ana", c.AnsweredBy.DisplayName);
+    Assert.Contains("photos of your child", c.Wording);
+    Assert.True(HasConsent(Leo, "photos"));
+    Assert.False(HasConsent(Leo, "first-aid"));
+    Assert.Equal(1, ConsentsOwed(Leo).Count);
+  }
+  runas (Tom) { Assert.True(HasConsent(Leo, "photos")); }
+  Assert.Equal(1, HeardCount("consent photos Given"));
+}
+```
+
+From [`tests/consents.test.osy`](tests/consents.test.osy).
+
+```osy
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.Guardianship;
+
+[Test(LeoAtSchool)]
+void a_teacher_reads_who_to_call_and_who_may_collect_him() {
+  runas (Tom) {
+    var contacts = EmergencyContactsOf(Leo);
+    Assert.Equal(2, contacts.Count);
+    Assert.Equal("Grandma Rut", contacts[0].Name);
+    var collect = MayCollectNames(Leo);
+    Assert.Equal(2, collect.Count);
+    Assert.Equal("Ana", collect[0]);
+    Assert.Equal("Grandma Rut", collect[1]);
+  }
+}
+```
+
+From [`tests/contacts.test.osy`](tests/contacts.test.osy).
+
+## Learn more
+
+- [The Osysharp.Guardianship reference](https://osysharp.com/reference/security/guardianship-kit/)
+- [Osysharp.Guardianship in the package catalogue](https://osysharp.com/packages/#osysharp-guardianship)
+- [The Osy# reference](https://osysharp.com/reference/) — the language, the runtime and every kit
+- [`llms-full.txt`](https://osysharp.com/llms-full.txt) — the whole reference and specification as one Markdown file, for a coding agent
+
+## Licence
+
+MIT — see [`LICENSE`](LICENSE).
