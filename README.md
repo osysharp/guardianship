@@ -29,7 +29,7 @@ books, signs and answers for someone else.
 ```osy
 // app.osy
 use Osysharp.Identity@0;
-use Osysharp.UserAccounts@1;
+use Osysharp.UserAccounts@2;
 use Osysharp.Guardianship@0;
 ```
 
